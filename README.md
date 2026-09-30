@@ -58,3 +58,8 @@ Dibandingkan dengan repo upstream (`lucasbuilds/animeku-cli`), fork ini membawa 
   - Bersih dari compiler warnings (0 warnings).
   - Eliminasi dead code, magic numbers/strings, dan deep nesting.
   - Ditambahkan unit test & integration test otomatis (`cargo test`).
+
+#### 4. Credits
+- [lucasbuilds](https://github.com/lucasbuilds/animeku-cli) - For Base Repo
+- [Wingky530](https://github.com/Wingky530/otakudesu-scraper) - For Otakudesu Scraper
+- [annurdian](https://github.com/annurdien/IDLIX-API) - For Idlixku API
