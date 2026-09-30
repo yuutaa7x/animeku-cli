@@ -8,6 +8,9 @@ Streaming anime dan film Asia dengan subtitle Indonesia lewat terminal.
 
 </div>
 
+### Tutorial Penggunaan
+<video src="https://github.com/yuutaa7x/animeku-cli/raw/main/assets/tutorial.mp4" controls="controls" style="max-width: 100%;"></video>
+
 ### instalasi
 > [!NOTE]
 > Pastikan kamu sudah menginstall Rust dan pemutar media (**mpv** sangat disarankan), jika belum silahkan klik [tautan berikut](https://rustup.rs/).
