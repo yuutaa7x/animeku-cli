@@ -10,7 +10,9 @@ Streaming anime dan film Asia dengan subtitle Indonesia lewat terminal.
 
 ### Tutorial Penggunaan
 
-https://github.com/yuutaa7x/animeku-cli/raw/main/assets/tutorial.mp4
+<video width="100%" controls>
+  <source src="assets/tutorial.mp4" type="video/mp4">
+</video>
 
 ### instalasi
 > [!NOTE]
