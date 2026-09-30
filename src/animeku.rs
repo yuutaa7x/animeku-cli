@@ -20,6 +20,10 @@ pub struct AnimekuCli {
 }
 
 impl AnimekuCli {
+    pub fn get_meta(&self, id: &str) -> Option<crate::models::Meta> {
+        self.episode_cache.get(id).map(|(_, m)| m.clone())
+    }
+
     pub fn new(extractor: Box<dyn Ext>) -> Self {
         Self {
             movie_cache: HashMap::new(),
@@ -29,7 +33,7 @@ impl AnimekuCli {
         }
     }
 
-    pub async fn search(&mut self, search_title: &str) -> anyhow::Result<Movie> {
+    pub async fn search(&mut self, search_title: &str) -> anyhow::Result<Option<Movie>> {
         print!(
             "{} Proses pencarian '{}'.. ",
             "◆".blue(),
@@ -81,23 +85,30 @@ impl AnimekuCli {
                     total_episodes: None,
                 })
             }
+            movie_list.push(Movie {
+                id: "0".into(),
+                title: "[ Kembali ke Pencarian ]".into(),
+                total_episodes: None,
+            });
 
             let movie = input::choice(movie_list, false)?;
             if movie.id == "1" {
                 page -= 1;
             } else if movie.id == "2" {
                 page += 1;
+            } else if movie.id == "0" {
+                return Ok(None);
             } else {
-                return Ok(movie);
+                return Ok(Some(movie));
             }
         }
     }
 
-    pub async fn extract_episode(&mut self, movie: Movie) -> anyhow::Result<Episode> {
+    pub async fn extract_episode(&mut self, movie: Movie) -> anyhow::Result<Option<Episode>> {
         print!(
             "{} Memuat daftar episode '{}' .. ",
             "◆".blue(),
-            movie.id.green()
+            movie.title.trim().green()
         );
         stdout().flush()?;
 
@@ -137,15 +148,25 @@ impl AnimekuCli {
         }
         println!();
 
-        let selected = input::choice(episodes, true)?;
-        Ok(selected)
+        let mut opts = episodes;
+        opts.push(Episode {
+            id: "0".into(),
+            title: "[ Kembali ke Pilih Anime ]".into(),
+            is_series: false,
+        });
+        let selected = input::choice(opts, true)?;
+        if selected.id == "0" {
+            Ok(None)
+        } else {
+            Ok(Some(selected))
+        }
     }
 
-    pub async fn extract_stream_urls(&mut self, episode: Episode) -> anyhow::Result<Stream> {
+    pub async fn extract_stream_urls(&mut self, episode: Episode) -> anyhow::Result<Option<Stream>> {
         print!(
-            "{} Memuat tautan unduhan '{}' .. ",
+            "{} Memuat server stream '{}' .. ",
             "◆".blue(),
-            episode.id.green()
+            episode.title.trim().green()
         );
         stdout().flush()?;
 
@@ -166,7 +187,16 @@ impl AnimekuCli {
         }
         println!("berhasil");
 
-        let selected = input::choice(streams, false)?;
-        Ok(selected)
+        let mut opts = streams;
+        opts.push(Stream {
+            url: "0".into(),
+            title: "[ Kembali ke Pilih Episode ]".into(),
+        });
+        let selected = input::choice(opts, false)?;
+        if selected.url == "0" {
+            Ok(None)
+        } else {
+            Ok(Some(selected))
+        }
     }
 }
