@@ -22,6 +22,11 @@ const IDLIX_SUBTITLE_PATH: &str = "/tmp/animeku_idlix.vtt";
 const PROVIDER_IDLIX: usize = 0;
 const PROVIDER_OTAKUDESU: usize = 1;
 
+const REPO_URL: &str = "https://github.com/yuutaa7x/animeku-cli";
+const MENU_UPDATE: usize = 0;
+const MENU_WATCH: usize = 1;
+const MENU_EXIT: usize = 2;
+
 fn get_ext(input: &crate::models::Input) -> Box<dyn Ext> {
     match input.tipe {
         PROVIDER_IDLIX => Box::new(ext::idlix::Idlix::new()),
@@ -489,6 +494,98 @@ async fn handle_movie_episodes(
     Ok(())
 }
 
+fn show_main_menu() -> anyhow::Result<usize> {
+    let items = [
+        "1. 🔄 Update Animeku-CLI",
+        "2. 🎬 Go Watch Anime / Movie",
+        "3. ❌ Exit",
+    ];
+
+    let choice = dialoguer::Select::with_theme(&crate::util::custom_theme())
+        .with_prompt("Pilih Menu:")
+        .default(MENU_WATCH)
+        .items(&items)
+        .interact()?;
+
+    Ok(choice)
+}
+
+fn handle_self_update() -> anyhow::Result<()> {
+    clearscreen_and_show_banner()?;
+    println!("{} Memeriksa dan mengunduh pembaruan...", "◆".blue());
+    println!("  Repository: {}\n", REPO_URL.cyan());
+
+    let is_git_repo = std::path::Path::new(".git").exists();
+    let status = if is_git_repo {
+        println!("{} Terdeteksi repositori lokal. Menjalankan git pull & cargo install...", "ℹ".yellow());
+        let _ = Command::new("git").args(["pull", "origin", "main"]).status();
+        Command::new("cargo")
+            .args(["install", "--path", ".", "--force"])
+            .status()
+    } else {
+        println!("{} Mengunduh dan mengompilasi dari GitHub...", "⏳".yellow());
+        Command::new("cargo")
+            .args(["install", "--git", REPO_URL, "--force"])
+            .status()
+    };
+
+    match status {
+        Ok(s) if s.success() => {
+            println!("\n  {} Pembaruan berhasil diinstal!", "✓".green());
+            if let Some(home) = dirs::home_dir() {
+                let local_bin = home.join(".local/bin/animeku-cli");
+                let candidate_bins = [
+                    home.join(".cargo/bin/animeku-cli"),
+                    home.join(".local/share/rust-cargo/bin/animeku-cli"),
+                    std::path::PathBuf::from("target/release/animeku-cli"),
+                    std::path::PathBuf::from("target/debug/animeku-cli"),
+                ];
+                for candidate in candidate_bins {
+                    if candidate.exists() && local_bin.exists() {
+                        let _ = std::fs::copy(&candidate, &local_bin);
+                        break;
+                    }
+                }
+            }
+            println!("  Silahkan jalankan ulang aplikasi.");
+        }
+        _ => {
+            println!("\n  {} Gagal memperbarui secara otomatis.", "■".red());
+            println!("  Silahkan jalankan secara manual:");
+            println!("  cargo install --git {} --force", REPO_URL);
+        }
+    }
+
+    println!("\nTekan Enter untuk kembali ke menu...");
+    let mut dummy = String::new();
+    let _ = std::io::stdin().read_line(&mut dummy);
+    Ok(())
+}
+
+async fn handle_watch_mode(discord: &mut Option<DiscordIpcClient>) -> anyhow::Result<()> {
+    loop {
+        clearscreen_and_show_banner()?;
+        let input = match get_user_input()? {
+            Some(user_input) => user_input,
+            None => break, // Back to main menu
+        };
+
+        let extractor = get_ext(&input);
+        let mut animeku = AnimekuCli::new(extractor);
+
+        loop {
+            clearscreen_and_show_banner()?;
+            let movie = match animeku.search(&input.title).await? {
+                Some(selected_movie) => selected_movie,
+                None => break, // Back to input prompt
+            };
+
+            handle_movie_episodes(&mut animeku, &movie, input.tipe, discord).await?;
+        }
+    }
+    Ok(())
+}
+
 async fn run_app() -> anyhow::Result<()> {
     let mut discord = Some(DiscordIpcClient::new(DISCORD_APP_ID));
     if let Some(ref mut drpc) = discord {
@@ -505,24 +602,24 @@ async fn run_app() -> anyhow::Result<()> {
 
     loop {
         clearscreen_and_show_banner()?;
-        let input = match get_user_input()? {
-            Some(user_input) => user_input,
-            None => return Ok(()),
-        };
+        let menu_choice = show_main_menu()?;
 
-        let extractor = get_ext(&input);
-        let mut animeku = AnimekuCli::new(extractor);
-
-        loop {
-            clearscreen_and_show_banner()?;
-            let movie = match animeku.search(&input.title).await? {
-                Some(selected_movie) => selected_movie,
-                None => break, // Back to input prompt
-            };
-
-            handle_movie_episodes(&mut animeku, &movie, input.tipe, &mut discord).await?;
+        match menu_choice {
+            MENU_UPDATE => {
+                handle_self_update()?;
+            }
+            MENU_WATCH => {
+                handle_watch_mode(&mut discord).await?;
+            }
+            MENU_EXIT => {
+                println!("\nSampai jumpa lagi! 👋\n");
+                return Ok(());
+            }
+            _ => break,
         }
     }
+
+    Ok(())
 }
 
 fn main() -> anyhow::Result<()> {
