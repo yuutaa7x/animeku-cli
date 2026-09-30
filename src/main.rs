@@ -18,6 +18,8 @@ const DISCORD_APP_ID: &str = "1549897147577667784";
 const DEFAULT_DISCORD_LOGO: &str = "logoanimekucli";
 const IDLIX_AUDIO_PATH: &str = "/tmp/animeku_idlix_audio.m3u8";
 const IDLIX_SUBTITLE_PATH: &str = "/tmp/animeku_idlix.vtt";
+const MPV_TRACK_SCRIPT: &str = "/tmp/animeku_track.lua";
+const MPV_LAST_POS_FILE: &str = "/tmp/animeku_last_pos.txt";
 
 const PROVIDER_IDLIX: usize = 0;
 const PROVIDER_OTAKUDESU: usize = 1;
@@ -27,12 +29,16 @@ const MENU_UPDATE: usize = 0;
 const MENU_WATCH: usize = 1;
 const MENU_EXIT: usize = 2;
 
-fn get_ext(input: &crate::models::Input) -> Box<dyn Ext> {
-    match input.tipe {
+fn get_ext_by_provider(provider_type: usize) -> Box<dyn Ext> {
+    match provider_type {
         PROVIDER_IDLIX => Box::new(ext::idlix::Idlix::new()),
         PROVIDER_OTAKUDESU => Box::new(ext::otakudesu::Otakudesu::new()),
         _ => Box::new(ext::idlix::Idlix::new()),
     }
+}
+
+fn get_ext(input: &crate::models::Input) -> Box<dyn Ext> {
+    get_ext_by_provider(input.tipe)
 }
 
 fn check_command_exists(cmd: &str) -> bool {
@@ -361,7 +367,7 @@ fn reset_discord_status(discord: &mut Option<DiscordIpcClient>) {
     }
 }
 
-fn execute_player(stream_url: &str, provider_type: usize) -> anyhow::Result<()> {
+fn execute_player(stream_url: &str, provider_type: usize, start_seconds: u64) -> anyhow::Result<u64> {
     print!("{} Membuka tautan diaplikasi eksternal .. \n", "◆".blue());
     stdout().flush()?;
 
@@ -371,12 +377,42 @@ fn execute_player(stream_url: &str, provider_type: usize) -> anyhow::Result<()> 
         .items(&["Putar dengan MPV", "Putar dengan VLC", "Buka di Browser", "Kembali"])
         .interact()?;
 
+    let mut final_pos = start_seconds;
+
     match player_choice {
         0 => {
             println!("Sedang memutar video di MPV... (Tutup MPV untuk kembali ke menu)");
+
+            let lua_script = format!(
+                r#"
+local last_pos = {}
+mp.observe_property("time-pos", "number", function(name, val)
+    if val then last_pos = val end
+end)
+local function save()
+    local f = io.open("{}", "w")
+    if f then
+        f:write(tostring(math.floor(last_pos)))
+        f:close()
+    end
+end
+mp.add_periodic_timer(2, save)
+mp.register_event("shutdown", save)
+"#,
+                start_seconds, MPV_LAST_POS_FILE
+            );
+            let _ = std::fs::write(MPV_TRACK_SCRIPT, lua_script);
+            let _ = std::fs::remove_file(MPV_LAST_POS_FILE);
+
             let mut cmd = Command::new("mpv");
             cmd.arg("--hwdec=auto-safe");
             cmd.arg("--cache=yes");
+            cmd.arg(format!("--script={}", MPV_TRACK_SCRIPT));
+
+            if start_seconds > 0 {
+                cmd.arg(format!("--start={}", start_seconds));
+            }
+
             if provider_type == PROVIDER_IDLIX {
                 cmd.arg("--demuxer=lavf");
                 cmd.arg("--demuxer-lavf-o-append=protocol_whitelist=file,http,https,tcp,tls,crypto,data");
@@ -408,10 +444,21 @@ fn execute_player(stream_url: &str, provider_type: usize) -> anyhow::Result<()> 
             } else {
                 eprintln!("{} MPV tidak ditemukan!", "■".red());
             }
+
+            if let Ok(saved) = std::fs::read_to_string(MPV_LAST_POS_FILE) {
+                if let Ok(pos) = saved.trim().parse::<u64>() {
+                    final_pos = pos;
+                }
+            }
+            let _ = std::fs::remove_file(MPV_LAST_POS_FILE);
+            let _ = std::fs::remove_file(MPV_TRACK_SCRIPT);
         },
         1 => {
             println!("Sedang memutar video di VLC... (Tutup VLC untuk kembali ke menu)");
             let mut cmd = Command::new("vlc");
+            if start_seconds > 0 {
+                cmd.arg(format!("--start-time={}", start_seconds));
+            }
             if provider_type == PROVIDER_OTAKUDESU {
                 cmd.arg("--http-referrer=https://desustream.net/");
                 cmd.arg("--http-user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36");
@@ -434,7 +481,7 @@ fn execute_player(stream_url: &str, provider_type: usize) -> anyhow::Result<()> 
         },
         _ => {},
     }
-    Ok(())
+    Ok(final_pos)
 }
 
 async fn handle_movie_episodes(
@@ -486,7 +533,13 @@ async fn handle_movie_episodes(
 
         let stream_opt = animeku.extract_stream_urls(episode.clone()).await?;
         if let Some(stream) = stream_opt {
-            execute_player(&stream.url, provider_type)?;
+            let last_pos = execute_player(&stream.url, provider_type, 0)?;
+            input::save_last_watch(&crate::models::LastWatch {
+                movie: movie.clone(),
+                episode: episode.clone(),
+                provider_type,
+                position_seconds: last_pos,
+            });
         }
         
         reset_discord_status(discord);
@@ -562,12 +615,12 @@ fn handle_self_update() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle_watch_mode(discord: &mut Option<DiscordIpcClient>) -> anyhow::Result<()> {
+async fn handle_search_and_watch(discord: &mut Option<DiscordIpcClient>) -> anyhow::Result<()> {
     loop {
         clearscreen_and_show_banner()?;
         let input = match get_user_input()? {
             Some(user_input) => user_input,
-            None => break, // Back to main menu
+            None => break, // Back to watch submenu
         };
 
         let extractor = get_ext(&input);
@@ -581,6 +634,111 @@ async fn handle_watch_mode(discord: &mut Option<DiscordIpcClient>) -> anyhow::Re
             };
 
             handle_movie_episodes(&mut animeku, &movie, input.tipe, discord).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> anyhow::Result<()> {
+    clearscreen_and_show_banner()?;
+    let last_watch_opt = input::load_last_watch();
+    let last_watch = match last_watch_opt {
+        Some(lw) => lw,
+        None => {
+            println!("Riwayat Tontonan Terakhir:\n");
+            println!("  Belum ada riwayat tontonan yang tersimpan.\n");
+            println!("Tekan Enter untuk kembali...");
+            let mut dummy = String::new();
+            let _ = std::io::stdin().read_line(&mut dummy);
+            return Ok(());
+        }
+    };
+
+    println!("Riwayat Tontonan Terakhir:");
+    println!("  Judul    : {}", last_watch.movie.title.trim());
+    println!("  Episode  : {}", last_watch.episode.title.trim());
+    println!("  Posisi   : {}", last_watch.format_duration());
+    let provider_name = if last_watch.provider_type == PROVIDER_OTAKUDESU {
+        "Otakudesu"
+    } else {
+        "Idlix"
+    };
+    println!("  Provider : {}\n", provider_name);
+
+    let actions = [
+        format!("1. Lanjutkan Menonton (mulai {})", last_watch.format_duration()),
+        "2. Putar Ulang dari Awal (00:00)".to_string(),
+        "3. Kembali".to_string(),
+    ];
+
+    let action_choice = dialoguer::Select::with_theme(&crate::util::custom_theme())
+        .with_prompt("Pilih Aksi:")
+        .default(0)
+        .items(&actions)
+        .interact()?;
+
+    let start_seconds = match action_choice {
+        0 => last_watch.position_seconds,
+        1 => 0,
+        _ => return Ok(()),
+    };
+
+    clearscreen_and_show_banner()?;
+
+    let season_num = if last_watch.episode.is_series {
+        detect_season(&last_watch.movie.title, "", &[]).unwrap_or(1)
+    } else {
+        1
+    };
+
+    update_discord_status(
+        discord,
+        &last_watch.movie.title,
+        &last_watch.episode.title,
+        last_watch.episode.is_series,
+        season_num,
+        None,
+    );
+
+    let mut animeku = AnimekuCli::new(get_ext_by_provider(last_watch.provider_type));
+    let stream_opt = animeku.extract_stream_urls(last_watch.episode.clone()).await?;
+    if let Some(stream) = stream_opt {
+        let final_pos = execute_player(&stream.url, last_watch.provider_type, start_seconds)?;
+        input::save_last_watch(&crate::models::LastWatch {
+            movie: last_watch.movie.clone(),
+            episode: last_watch.episode.clone(),
+            provider_type: last_watch.provider_type,
+            position_seconds: final_pos,
+        });
+    }
+
+    reset_discord_status(discord);
+    Ok(())
+}
+
+async fn handle_watch_mode(discord: &mut Option<DiscordIpcClient>) -> anyhow::Result<()> {
+    loop {
+        clearscreen_and_show_banner()?;
+        let menu_items = [
+            "1. Watch Any Anime / Movie",
+            "2. Watch Last Anime / Movie",
+            "3. Kembali ke Menu Utama",
+        ];
+
+        let choice = dialoguer::Select::with_theme(&crate::util::custom_theme())
+            .with_prompt("Pilih Mode Menonton:")
+            .default(0)
+            .items(&menu_items)
+            .interact()?;
+
+        match choice {
+            0 => {
+                handle_search_and_watch(discord).await?;
+            }
+            1 => {
+                handle_resume_last_watch(discord).await?;
+            }
+            _ => break,
         }
     }
     Ok(())

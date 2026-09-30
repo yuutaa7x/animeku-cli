@@ -30,7 +30,25 @@ fn save_history(title: &str) {
     }
 }
 
-use crate::models::Input;
+use crate::models::{Input, LastWatch};
+
+const LAST_WATCH_FILE: &str = ".animeku_last_watch.json";
+
+pub fn load_last_watch() -> Option<LastWatch> {
+    let home = dirs::home_dir()?;
+    let path = home.join(LAST_WATCH_FILE);
+    let content = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+pub fn save_last_watch(last_watch: &LastWatch) {
+    if let Some(home) = dirs::home_dir() {
+        let path = home.join(LAST_WATCH_FILE);
+        if let Ok(content) = serde_json::to_string_pretty(last_watch) {
+            let _ = fs::write(path, content);
+        }
+    }
+}
 
 pub fn get_user_input() -> anyhow::Result<Option<Input>> {
     let mut options = vec!["[ Ketik Judul Pencarian Baru ]".to_string()];

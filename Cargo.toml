@@ -22,6 +22,7 @@ open = "5.0.1"
 regex = "1.10.3"
 reqwest = { version = "0.11.24", features = ["json", "cookies"] }
 serde_json = "1.0.113"
+serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1.36.0", features = ["rt-multi-thread"] }
 viuer = "0.7.1"
 discord-rich-presence = "1.1.0"
