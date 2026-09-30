@@ -8,7 +8,7 @@ Streaming anime dan film Asia dengan subtitle Indonesia lewat terminal.
 
 </div>
 
-### Tutorial Penggunaan
+### Tutorial Penginstalan & Penggunaan
 
 https://github.com/user-attachments/assets/5d029903-ba1f-46c4-ab72-f021d8500a7c
 
