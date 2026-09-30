@@ -270,7 +270,7 @@ impl Ext for Idlix {
         if wait_secs > 0 {
             println!();
             for s in (1..=wait_secs).rev() {
-                print!("\r{} Menunggu proteksi stream terbuka... ({}s) ", "⏳".yellow(), s);
+                print!("\r{} Menunggu proteksi stream terbuka... ({}s) ", "◆".yellow(), s);
                 stdout().flush()?;
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }

@@ -368,12 +368,12 @@ fn execute_player(stream_url: &str, provider_type: usize) -> anyhow::Result<()> 
     let player_choice = dialoguer::Select::with_theme(&crate::util::custom_theme())
         .with_prompt("Pilih Aksi:")
         .default(0)
-        .items(&["🎬 Putar dengan MPV", "🎬 Putar dengan VLC", "🌐 Buka di Browser", "🔙 Kembali"])
+        .items(&["Putar dengan MPV", "Putar dengan VLC", "Buka di Browser", "Kembali"])
         .interact()?;
 
     match player_choice {
         0 => {
-            println!("🎬 Sedang memutar video di MPV... (Tutup MPV untuk kembali ke menu)");
+            println!("Sedang memutar video di MPV... (Tutup MPV untuk kembali ke menu)");
             let mut cmd = Command::new("mpv");
             cmd.arg("--hwdec=auto-safe");
             cmd.arg("--cache=yes");
@@ -410,7 +410,7 @@ fn execute_player(stream_url: &str, provider_type: usize) -> anyhow::Result<()> 
             }
         },
         1 => {
-            println!("🎬 Sedang memutar video di VLC... (Tutup VLC untuk kembali ke menu)");
+            println!("Sedang memutar video di VLC... (Tutup VLC untuk kembali ke menu)");
             let mut cmd = Command::new("vlc");
             if provider_type == PROVIDER_OTAKUDESU {
                 cmd.arg("--http-referrer=https://desustream.net/");
@@ -496,9 +496,9 @@ async fn handle_movie_episodes(
 
 fn show_main_menu() -> anyhow::Result<usize> {
     let items = [
-        "1. 🔄 Update Animeku-CLI",
-        "2. 🎬 Go Watch Anime / Movie",
-        "3. ❌ Exit",
+        "1. Update Animeku-CLI",
+        "2. Go Watch Anime / Movie",
+        "3. Exit",
     ];
 
     let choice = dialoguer::Select::with_theme(&crate::util::custom_theme())
@@ -523,7 +523,7 @@ fn handle_self_update() -> anyhow::Result<()> {
             .args(["install", "--path", ".", "--force"])
             .status()
     } else {
-        println!("{} Mengunduh dan mengompilasi dari GitHub...", "⏳".yellow());
+        println!("{} Mengunduh dan mengompilasi dari GitHub...", "◆".blue());
         Command::new("cargo")
             .args(["install", "--git", REPO_URL, "--force"])
             .status()
@@ -612,7 +612,7 @@ async fn run_app() -> anyhow::Result<()> {
                 handle_watch_mode(&mut discord).await?;
             }
             MENU_EXIT => {
-                println!("\nSampai jumpa lagi! 👋\n");
+                println!("\nSampai jumpa lagi!\n");
                 return Ok(());
             }
             _ => break,

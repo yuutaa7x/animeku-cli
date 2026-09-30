@@ -33,7 +33,7 @@ fn save_history(title: &str) {
 use crate::models::Input;
 
 pub fn get_user_input() -> anyhow::Result<Option<Input>> {
-    let mut options = vec!["[ ✏️ Ketik Judul Pencarian Baru ]".to_string()];
+    let mut options = vec!["[ Ketik Judul Pencarian Baru ]".to_string()];
     options.extend(load_history());
 
     let selection = dialoguer::FuzzySelect::with_theme(&crate::util::custom_theme())
