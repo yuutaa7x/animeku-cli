@@ -370,10 +370,18 @@ fn execute_player(stream_url: &str, provider_type: usize) -> anyhow::Result<()> 
         0 => {
             println!("🎬 Sedang memutar video di MPV... (Tutup MPV untuk kembali ke menu)");
             let mut cmd = Command::new("mpv");
+            cmd.arg("--hwdec=auto-safe");
+            cmd.arg("--cache=yes");
             if provider_type == PROVIDER_IDLIX {
                 cmd.arg("--demuxer=lavf");
                 cmd.arg("--demuxer-lavf-o-append=protocol_whitelist=file,http,https,tcp,tls,crypto,data");
                 cmd.arg("--demuxer-lavf-o-append=http_persistent=0");
+                cmd.arg("--demuxer-lavf-o-append=reconnect=1");
+                cmd.arg("--demuxer-lavf-o-append=reconnect_streamed=1");
+                cmd.arg("--demuxer-lavf-o-append=reconnect_on_network_error=1");
+                cmd.arg("--demuxer-lavf-o-append=reconnect_delay_max=5");
+                cmd.arg("--demuxer-max-bytes=150M");
+                cmd.arg("--demuxer-readahead-secs=30");
                 cmd.arg("--ytdl=no");
                 cmd.arg("--msg-level=ffmpeg/demuxer=error");
                 if std::path::Path::new(IDLIX_AUDIO_PATH).exists() {
