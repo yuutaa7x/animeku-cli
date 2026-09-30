@@ -137,14 +137,18 @@ if %ERRORLEVEL% EQU 0 (
 
     where mpv >nul 2>&1
     if !ERRORLEVEL! NEQ 0 (
-        echo.
-        echo [INFO] MPV player is not installed yet.
-        where winget >nul 2>&1
-        if !ERRORLEVEL! EQU 0 (
-            echo [INFO] Installing MPV automatically via winget...
-            winget install --id shinchiro.mpv -e --source winget --accept-package-agreements --accept-source-agreements
+        if exist "%ProgramFiles%\MPV Player\mpv.exe" (
+            echo [INFO] MPV player is already installed at %ProgramFiles%\MPV Player\mpv.exe
         ) else (
-            echo [INFO] Please install MPV from https://mpv.io/installation/
+            echo.
+            echo [INFO] MPV player is not installed yet.
+            where winget >nul 2>&1
+            if !ERRORLEVEL! EQU 0 (
+                echo [INFO] Installing MPV automatically via winget...
+                winget install --id shinchiro.mpv -e --source winget --accept-package-agreements --accept-source-agreements
+            ) else (
+                echo [INFO] Please install MPV from https://mpv.io/installation/
+            )
         )
     )
 

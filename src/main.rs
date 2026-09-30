@@ -121,6 +121,7 @@ fn check_windows_known_paths(cmd: &str) -> bool {
         let paths = [
             std::path::Path::new(&prog_files).join(cmd).join(&cmd_exe),
             std::path::Path::new(&prog_files).join("mpv").join("mpv.exe"),
+            std::path::Path::new(&prog_files).join("MPV Player").join("mpv.exe"),
             std::path::Path::new(&prog_files).join("mpv.net").join("mpvnet.exe"),
             std::path::Path::new(&prog_files).join("VideoLAN").join("VLC").join(&cmd_exe),
         ];
@@ -197,6 +198,10 @@ fn resolve_command_path(cmd: &str) -> String {
             if p_mpv.exists() {
                 return p_mpv.to_string_lossy().to_string();
             }
+            let p_mpv2 = std::path::Path::new(&prog_files).join("MPV Player").join("mpv.exe");
+            if p_mpv2.exists() {
+                return p_mpv2.to_string_lossy().to_string();
+            }
             let p_mpvnet = std::path::Path::new(&prog_files).join("mpv.net").join("mpvnet.exe");
             if p_mpvnet.exists() {
                 return p_mpvnet.to_string_lossy().to_string();
@@ -270,17 +275,17 @@ fn install_dependencies(package_manager: &str) {
         },
         "winget" => {
             let winget_bin = resolve_command_path("winget");
-            println!("  {} Menjalankan: winget install --id shinchiro.mpv ...", "ℹ".yellow());
+            println!("  {} Menjalankan: winget install --id shinchiro.mpv --source winget ...", "ℹ".yellow());
             let status1 = Command::new(&winget_bin)
-                .args(&["install", "--id", "shinchiro.mpv", "-e", "--accept-source-agreements", "--accept-package-agreements"])
+                .args(&["install", "--id", "shinchiro.mpv", "-e", "--source", "winget", "--accept-source-agreements", "--accept-package-agreements"])
                 .status();
 
             let mpv_ok = match status1 {
                 Ok(s) if s.success() => true,
                 _ => {
-                    println!("  {} Mencoba alternatif: winget install --id mpv.net ...", "ℹ".yellow());
+                    println!("  {} Mencoba alternatif: winget install --id mpv.net --source winget ...", "ℹ".yellow());
                     let s2 = Command::new(&winget_bin)
-                        .args(&["install", "--id", "mpv.net", "-e", "--accept-source-agreements", "--accept-package-agreements"])
+                        .args(&["install", "--id", "mpv.net", "-e", "--source", "winget", "--accept-source-agreements", "--accept-package-agreements"])
                         .status();
                     s2.map(|s| s.success()).unwrap_or(false)
                 }
@@ -292,9 +297,9 @@ fn install_dependencies(package_manager: &str) {
                 eprintln!("  {} Gagal menginstal MPV via winget.", "■".red());
             }
 
-            println!("  {} Menjalankan: winget install --id yt-dlp.yt-dlp ...", "ℹ".yellow());
+            println!("  {} Menjalankan: winget install --id yt-dlp.yt-dlp --source winget ...", "ℹ".yellow());
             let _ = Command::new(&winget_bin)
-                .args(&["install", "--id", "yt-dlp.yt-dlp", "-e", "--accept-source-agreements", "--accept-package-agreements"])
+                .args(&["install", "--id", "yt-dlp.yt-dlp", "-e", "--source", "winget", "--accept-source-agreements", "--accept-package-agreements"])
                 .status();
         },
         "choco" => {
@@ -401,7 +406,7 @@ fn show_health_screen() -> anyhow::Result<bool> {
                     println!("\n{} Tidak ditemukan package manager otomatis (winget / choco / scoop).", "■".red());
                     println!("  Silahkan pilih salah satu opsi instalasi MPV untuk Windows:");
                     println!("  1. Jalankan di PowerShell / CMD:");
-                    println!("     {}", "winget install --id shinchiro.mpv".cyan());
+                    println!("     {}", "winget install --id shinchiro.mpv --source winget".cyan());
                     println!("  2. Atau install via Scoop:");
                     println!("     {}", "scoop install mpv".cyan());
                     println!("  3. Atau unduh manual installer MPV di:");
