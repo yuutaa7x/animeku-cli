@@ -4,7 +4,7 @@
 
 Streaming anime dan film Asia dengan subtitle Indonesia lewat terminal.
 
-*Fork dari [lucasbuilds/animeku-cli](https://github.com/lucasbuilds/animeku-cli)*
+*Fork dari [lucasbuilds/animeku-cli](https://github.com/lucasbuilds/animeku-cli)* | Vibecoded BTW (sorry for this bad things)
 
 </div>
 
