@@ -12,7 +12,7 @@ Streaming anime dan film Asia dengan subtitle Indonesia lewat terminal.
 
 https://github.com/user-attachments/assets/5d029903-ba1f-46c4-ab72-f021d8500a7c
 
-### instalasi
+### Instalasi
 > [!NOTE]
 > Pastikan kamu sudah menginstall Rust dan pemutar media (**mpv** sangat disarankan), jika belum silahkan klik [tautan berikut](https://rustup.rs/).
 > 
@@ -42,7 +42,7 @@ cargo install --git https://github.com/yuutaa7x/animeku-cli
 
 Silahkan tunggu proses penginstallan selesai dan jika sudah, ketik `animeku-cli` untuk menjalankannya.
 
-### uninstall
+### Uninstall
 
 #### Auto Uninstall (Windows — satu baris)
 
