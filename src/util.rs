@@ -7,6 +7,13 @@ pub fn custom_theme() -> ColorfulTheme {
     theme
 }
 
+pub fn temp_file(name: &str) -> String {
+    std::env::temp_dir()
+        .join(name)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
 use reqwest::Client;
 
 #[macro_export]

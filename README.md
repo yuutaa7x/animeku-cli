@@ -12,7 +12,12 @@ Streaming anime dan film Asia dengan subtitle Indonesia lewat terminal.
 > [!NOTE]
 > Pastikan kamu sudah menginstall Rust dan pemutar media (**mpv** sangat disarankan), jika belum silahkan klik [tautan berikut](https://rustup.rs/).
 > 
-> Untuk pengguna android (Termux), install dengan menggunakan perintah `pkg install rust mpv`.
+> - **Windows**: Install MPV dengan mudah melalui terminal (PowerShell / CMD):
+>   ```powershell
+>   winget install --id shinchiro.mpv
+>   ```
+> - **Linux**: `sudo apt install mpv` (Ubuntu/Debian) atau `sudo pacman -S mpv` (Arch).
+> - **Android (Termux)**: `pkg install rust mpv`.
 
 Langkah berikutnya silahkan *copy paste* teks dibawah:
 ```bash
@@ -69,7 +74,17 @@ Dibandingkan dengan repo upstream (`lucasbuilds/animeku-cli`), fork ini membawa 
   - Eliminasi dead code, magic numbers/strings, dan deep nesting.
   - Ditambahkan unit test & integration test otomatis (`cargo test`).
 
-#### 5. Credits
+#### 5. Kompatibilitas Windows & Cross-Platform
+- **Auto-Install & Deteksi Package Manager**:
+  - Memperbaiki deteksi package manager Windows (`winget`, `choco`, `scoop`) yang sebelumnya gagal karena `which` tidak tersedia di Windows.
+  - Mendukung auto-install MPV resmi di Windows melalui winget (`shinchiro.mpv` dengan fallback `mpv.net`).
+  - Pencarian jalur binary cerdas (mendeteksi MPV/VLC di `Program Files`, `WindowsApps`, `scoop`, `chocolatey`).
+- **Penyimpanan Temp File Cross-Platform**:
+  - Mengganti path hardcoded `/tmp/` dengan direktori temp native sistem (`std::env::temp_dir()`) dan forward slashes yang aman untuk Windows dan script Lua MPV.
+- **Self-Update Aman di Windows**:
+  - Mencegah error file-locking executable saat self-update di Windows dengan auto-rename binary berjalan.
+
+#### 6. Credits
 - [lucasbuilds](https://github.com/lucasbuilds/animeku-cli) - For Base Repo
 - [Wingky530](https://github.com/Wingky530/otakudesu-scraper) - For Otakudesu Scraper
 - [annurdian](https://github.com/annurdien/IDLIX-API) - For Idlixku API

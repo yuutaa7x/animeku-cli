@@ -12,15 +12,16 @@ use crate::{
 };
 
 const CHROME_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-const COOKIE_CACHE_PATH: &str = "/tmp/animeku_idlix_cookies.txt";
-const AUDIO_PLAYLIST_PATH: &str = "/tmp/animeku_idlix_audio.m3u8";
-const SUBTITLE_FILE_PATH: &str = "/tmp/animeku_idlix.vtt";
+fn cookie_cache_path() -> String { crate::util::temp_file("animeku_idlix_cookies.txt") }
+fn audio_playlist_path() -> String { crate::util::temp_file("animeku_idlix_audio.m3u8") }
+fn subtitle_file_path() -> String { crate::util::temp_file("animeku_idlix.vtt") }
 const DEFAULT_REDEEM_URL: &str = "https://e2e.majorplay.net/api/play";
 const BANDWIDTH_1080P: u64 = 2_000_000;
 const BANDWIDTH_720P: u64 = 800_000;
 const BANDWIDTH_480P: u64 = 450_000;
 
 fn curl_get(url: &str) -> anyhow::Result<String> {
+    let cookie_path = cookie_cache_path();
     let output = Command::new("curl")
         .args([
             "-s",
@@ -28,8 +29,8 @@ fn curl_get(url: &str) -> anyhow::Result<String> {
             "-H", "Accept: application/json",
             "-H", "Origin: https://z2.idlixku.com",
             "-H", "Referer: https://z2.idlixku.com/",
-            "-b", COOKIE_CACHE_PATH,
-            "-c", COOKIE_CACHE_PATH,
+            "-b", &cookie_path,
+            "-c", &cookie_path,
             url,
         ])
         .output()?;
@@ -42,6 +43,7 @@ fn curl_get(url: &str) -> anyhow::Result<String> {
 }
 
 fn curl_post(url: &str, body: &Value) -> anyhow::Result<String> {
+    let cookie_path = cookie_cache_path();
     let output = Command::new("curl")
         .args([
             "-s",
@@ -51,8 +53,8 @@ fn curl_post(url: &str, body: &Value) -> anyhow::Result<String> {
             "-H", "Content-Type: application/json",
             "-H", "Origin: https://z2.idlixku.com",
             "-H", "Referer: https://z2.idlixku.com/",
-            "-b", COOKIE_CACHE_PATH,
-            "-c", COOKIE_CACHE_PATH,
+            "-b", &cookie_path,
+            "-c", &cookie_path,
             "-d", &body.to_string(),
             url,
         ])
@@ -319,7 +321,8 @@ impl Ext for Idlix {
         };
 
         // Download subtitle if available
-        let _ = fs::remove_file(SUBTITLE_FILE_PATH);
+        let sub_file = subtitle_file_path();
+        let _ = fs::remove_file(&sub_file);
         if let Some(subs) = redeem_json["subtitles"].as_array() {
             let id_sub = subs.iter().find(|s| {
                 let lang = s["lang"].as_str().unwrap_or("").to_lowercase();
@@ -330,7 +333,7 @@ impl Ext for Idlix {
             if let Some(sub) = id_sub {
                 if let Some(sub_path) = sub["path"].as_str() {
                     if let Ok(vtt_text) = curl_get(sub_path) {
-                        let _ = fs::write(SUBTITLE_FILE_PATH, vtt_text);
+                        let _ = fs::write(&sub_file, vtt_text);
                         println!(" {} Subtitle Indonesia berhasil dimuat.", "✓".green());
                     }
                 }
@@ -338,7 +341,7 @@ impl Ext for Idlix {
                 let label = first_sub["label"].as_str().unwrap_or("English");
                 if let Some(sub_path) = first_sub["path"].as_str() {
                     if let Ok(vtt_text) = curl_get(sub_path) {
-                        let _ = fs::write(SUBTITLE_FILE_PATH, vtt_text);
+                        let _ = fs::write(&sub_file, vtt_text);
                         println!(" {} Subtitle Indo tidak ada di server Idlix, memuat [{}] (tekan 'v' di MPV untuk hide).", "ℹ".yellow(), label);
                     }
                 }
@@ -351,7 +354,8 @@ impl Ext for Idlix {
         let lines: Vec<&str> = master_text.lines().collect();
 
         // 1. Check for separate audio stream
-        let _ = fs::remove_file(AUDIO_PLAYLIST_PATH);
+        let audio_file = audio_playlist_path();
+        let _ = fs::remove_file(&audio_file);
         for line in &lines {
             let trimmed = line.trim();
             if trimmed.starts_with("#EXT-X-MEDIA:TYPE=AUDIO") {
@@ -363,7 +367,7 @@ impl Ext for Idlix {
                         if let Ok(audio_raw) = curl_get(&audio_full_url) {
                             if audio_raw.trim().starts_with("#EXTM3U") {
                                 let audio_patched = patch_playlist(&audio_raw, &audio_full_url, token_suffix);
-                                let _ = fs::write(AUDIO_PLAYLIST_PATH, audio_patched);
+                                let _ = fs::write(&audio_file, audio_patched);
                                 break;
                             }
                         }
@@ -423,7 +427,7 @@ impl Ext for Idlix {
             };
 
             let child_patched = patch_playlist(&child_raw, &variant.child_url, token_suffix);
-            let video_out_path = format!("/tmp/animeku_idlix_video_{}_{}.m3u8", idx + 1, variant.quality);
+            let video_out_path = crate::util::temp_file(&format!("animeku_idlix_video_{}_{}.m3u8", idx + 1, variant.quality));
             if let Err(e) = fs::write(&video_out_path, child_patched) {
                 eprintln!(" {} Gagal menulis file playlist [{}]: {}", "■".red(), variant.quality, e);
                 continue;

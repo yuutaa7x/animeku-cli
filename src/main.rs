@@ -16,10 +16,21 @@ mod util;
 
 const DISCORD_APP_ID: &str = "1549897147577667784";
 const DEFAULT_DISCORD_LOGO: &str = "logoanimekucli";
-const IDLIX_AUDIO_PATH: &str = "/tmp/animeku_idlix_audio.m3u8";
-const IDLIX_SUBTITLE_PATH: &str = "/tmp/animeku_idlix.vtt";
-const MPV_TRACK_SCRIPT: &str = "/tmp/animeku_track.lua";
-const MPV_LAST_POS_FILE: &str = "/tmp/animeku_last_pos.txt";
+fn idlix_audio_path() -> String {
+    crate::util::temp_file("animeku_idlix_audio.m3u8")
+}
+
+fn idlix_subtitle_path() -> String {
+    crate::util::temp_file("animeku_idlix.vtt")
+}
+
+fn mpv_track_script_path() -> String {
+    crate::util::temp_file("animeku_track.lua")
+}
+
+fn mpv_last_pos_file_path() -> String {
+    crate::util::temp_file("animeku_last_pos.txt")
+}
 
 const PROVIDER_IDLIX: usize = 0;
 const PROVIDER_OTAKUDESU: usize = 1;
@@ -42,71 +53,256 @@ fn get_ext(input: &crate::models::Input) -> Box<dyn Ext> {
 }
 
 fn check_command_exists(cmd: &str) -> bool {
-    Command::new("which")
+    let p = std::path::Path::new(cmd);
+    if p.is_file() {
+        return true;
+    }
+
+    if let Some(paths) = std::env::var_os("PATH") {
+        let extensions: Vec<String> = if cfg!(target_os = "windows") {
+            let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".to_string());
+            pathext.split(';').map(|s| s.to_string()).collect()
+        } else {
+            vec!["".to_string()]
+        };
+
+        for dir in std::env::split_paths(&paths) {
+            let direct = dir.join(cmd);
+            if direct.is_file() {
+                return true;
+            }
+            if cfg!(target_os = "windows") {
+                for ext in &extensions {
+                    let with_ext = dir.join(format!("{}{}", cmd, ext));
+                    if with_ext.is_file() {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    let checker = if cfg!(target_os = "windows") { "where" } else { "which" };
+    if let Ok(status) = Command::new(checker)
         .arg(cmd)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    {
+        if status.success() {
+            return true;
+        }
+    }
+
+    if cfg!(target_os = "windows") {
+        if check_windows_known_paths(cmd) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn check_windows_known_paths(cmd: &str) -> bool {
+    let cmd_exe = if cmd.ends_with(".exe") {
+        cmd.to_string()
+    } else {
+        format!("{}.exe", cmd)
+    };
+
+    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+        let p = std::path::Path::new(&local_app_data).join("Microsoft").join("WindowsApps").join(&cmd_exe);
+        if p.exists() {
+            return true;
+        }
+    }
+
+    if let Ok(prog_files) = std::env::var("ProgramFiles") {
+        let paths = [
+            std::path::Path::new(&prog_files).join(cmd).join(&cmd_exe),
+            std::path::Path::new(&prog_files).join("mpv").join("mpv.exe"),
+            std::path::Path::new(&prog_files).join("mpv.net").join("mpvnet.exe"),
+            std::path::Path::new(&prog_files).join("VideoLAN").join("VLC").join(&cmd_exe),
+        ];
+        for p in &paths {
+            if p.exists() {
+                return true;
+            }
+        }
+    }
+
+    if let Ok(prog_files_x86) = std::env::var("ProgramFiles(x86)") {
+        let paths = [
+            std::path::Path::new(&prog_files_x86).join(cmd).join(&cmd_exe),
+            std::path::Path::new(&prog_files_x86).join("mpv").join("mpv.exe"),
+            std::path::Path::new(&prog_files_x86).join("VideoLAN").join("VLC").join(&cmd_exe),
+        ];
+        for p in &paths {
+            if p.exists() {
+                return true;
+            }
+        }
+    }
+
+    if let Ok(prog_data) = std::env::var("ProgramData") {
+        let p = std::path::Path::new(&prog_data).join("chocolatey").join("bin").join(&cmd_exe);
+        if p.exists() {
+            return true;
+        }
+    }
+
+    if let Some(home) = dirs::home_dir() {
+        let paths = [
+            home.join("scoop").join("shims").join(&cmd_exe),
+            home.join("scoop").join("shims").join(format!("{}.cmd", cmd)),
+            home.join("scoop").join("shims").join(format!("{}.ps1", cmd)),
+            home.join("scoop").join("apps").join(cmd).join("current").join(&cmd_exe),
+            std::path::PathBuf::from(r"C:\mpv\mpv.exe"),
+        ];
+        for p in &paths {
+            if p.exists() {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn resolve_command_path(cmd: &str) -> String {
+    if !cfg!(target_os = "windows") {
+        return cmd.to_string();
+    }
+
+    let cmd_exe = if cmd.ends_with(".exe") {
+        cmd.to_string()
+    } else {
+        format!("{}.exe", cmd)
+    };
+
+    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+        let p = std::path::Path::new(&local_app_data).join("Microsoft").join("WindowsApps").join(&cmd_exe);
+        if p.exists() {
+            return p.to_string_lossy().to_string();
+        }
+    }
+
+    if let Ok(prog_files) = std::env::var("ProgramFiles") {
+        let p = std::path::Path::new(&prog_files).join(cmd).join(&cmd_exe);
+        if p.exists() {
+            return p.to_string_lossy().to_string();
+        }
+        if cmd == "mpv" {
+            let p_mpv = std::path::Path::new(&prog_files).join("mpv").join("mpv.exe");
+            if p_mpv.exists() {
+                return p_mpv.to_string_lossy().to_string();
+            }
+            let p_mpvnet = std::path::Path::new(&prog_files).join("mpv.net").join("mpvnet.exe");
+            if p_mpvnet.exists() {
+                return p_mpvnet.to_string_lossy().to_string();
+            }
+        }
+        if cmd == "vlc" {
+            let pv = std::path::Path::new(&prog_files).join("VideoLAN").join("VLC").join("vlc.exe");
+            if pv.exists() {
+                return pv.to_string_lossy().to_string();
+            }
+        }
+    }
+
+    if let Some(home) = dirs::home_dir() {
+        let scoop = home.join("scoop").join("shims").join(&cmd_exe);
+        if scoop.exists() {
+            return scoop.to_string_lossy().to_string();
+        }
+        let choco = std::path::PathBuf::from(r"C:\ProgramData\chocolatey\bin").join(&cmd_exe);
+        if choco.exists() {
+            return choco.to_string_lossy().to_string();
+        }
+        let c_mpv = std::path::PathBuf::from(r"C:\mpv\mpv.exe");
+        if cmd == "mpv" && c_mpv.exists() {
+            return c_mpv.to_string_lossy().to_string();
+        }
+    }
+
+    cmd.to_string()
 }
 
 fn install_dependencies(package_manager: &str) {
-    let run_command_silent = |mut cmd: Command| {
-        let _ = cmd.stdout(std::process::Stdio::null())
-                   .stderr(std::process::Stdio::null())
-                   .status();
-    };
-
     println!("\n{} Menginstall dependensi menggunakan {}...", "◆".blue(), package_manager);
     match package_manager {
         "apt-get" => {
-            let mut cmd = Command::new("sudo");
-            cmd.args(&["apt-get", "install", "-y", "mpv", "yt-dlp"]);
-            run_command_silent(cmd);
+            let _ = Command::new("sudo")
+                .args(&["apt-get", "install", "-y", "mpv", "yt-dlp"])
+                .status();
         },
         "pacman" => {
-            let mut cmd = Command::new("sudo");
-            cmd.args(&["pacman", "-S", "--noconfirm", "mpv", "yt-dlp"]);
-            run_command_silent(cmd);
+            let _ = Command::new("sudo")
+                .args(&["pacman", "-S", "--noconfirm", "mpv", "yt-dlp"])
+                .status();
         },
         "dnf" => {
-            let mut cmd = Command::new("sudo");
-            cmd.args(&["dnf", "install", "-y", "mpv", "yt-dlp"]);
-            run_command_silent(cmd);
+            let _ = Command::new("sudo")
+                .args(&["dnf", "install", "-y", "mpv", "yt-dlp"])
+                .status();
         },
         "zypper" => {
-            let mut cmd = Command::new("sudo");
-            cmd.args(&["zypper", "install", "-y", "mpv", "yt-dlp"]);
-            run_command_silent(cmd);
+            let _ = Command::new("sudo")
+                .args(&["zypper", "install", "-y", "mpv", "yt-dlp"])
+                .status();
         },
         "apk" => {
-            let mut cmd = Command::new("sudo");
-            cmd.args(&["apk", "add", "mpv", "yt-dlp"]);
-            run_command_silent(cmd);
+            let _ = Command::new("sudo")
+                .args(&["apk", "add", "mpv", "yt-dlp"])
+                .status();
         },
         "brew" => {
-            let mut cmd = Command::new("brew");
-            cmd.args(&["install", "mpv", "yt-dlp"]);
-            run_command_silent(cmd);
+            let _ = Command::new("brew")
+                .args(&["install", "mpv", "yt-dlp"])
+                .status();
         },
         "winget" => {
-            let mut cmd1 = Command::new("winget");
-            cmd1.args(&["install", "-e", "--id", "mpv.net.mpv.net", "--accept-source-agreements", "--accept-package-agreements"]);
-            run_command_silent(cmd1);
-            let mut cmd2 = Command::new("winget");
-            cmd2.args(&["install", "-e", "--id", "yt-dlp.yt-dlp", "--accept-source-agreements", "--accept-package-agreements"]);
-            run_command_silent(cmd2);
+            let winget_bin = resolve_command_path("winget");
+            println!("  {} Menjalankan: winget install --id shinchiro.mpv ...", "ℹ".yellow());
+            let status1 = Command::new(&winget_bin)
+                .args(&["install", "--id", "shinchiro.mpv", "-e", "--accept-source-agreements", "--accept-package-agreements"])
+                .status();
+
+            let mpv_ok = match status1 {
+                Ok(s) if s.success() => true,
+                _ => {
+                    println!("  {} Mencoba alternatif: winget install --id mpv.net ...", "ℹ".yellow());
+                    let s2 = Command::new(&winget_bin)
+                        .args(&["install", "--id", "mpv.net", "-e", "--accept-source-agreements", "--accept-package-agreements"])
+                        .status();
+                    s2.map(|s| s.success()).unwrap_or(false)
+                }
+            };
+
+            if mpv_ok {
+                println!("  {} MPV berhasil diinstal!", "✓".green());
+            } else {
+                eprintln!("  {} Gagal menginstal MPV via winget.", "■".red());
+            }
+
+            println!("  {} Menjalankan: winget install --id yt-dlp.yt-dlp ...", "ℹ".yellow());
+            let _ = Command::new(&winget_bin)
+                .args(&["install", "--id", "yt-dlp.yt-dlp", "-e", "--accept-source-agreements", "--accept-package-agreements"])
+                .status();
         },
         "choco" => {
-            let mut cmd = Command::new("choco");
-            cmd.args(&["install", "-y", "mpv", "yt-dlp"]);
-            run_command_silent(cmd);
+            let choco_bin = resolve_command_path("choco");
+            println!("  {} Menjalankan: choco install -y mpv yt-dlp ...", "ℹ".yellow());
+            let _ = Command::new(&choco_bin)
+                .args(&["install", "-y", "mpv", "yt-dlp"])
+                .status();
         },
         "scoop" => {
-            let mut cmd = Command::new("scoop");
-            cmd.args(&["install", "mpv", "yt-dlp"]);
-            run_command_silent(cmd);
+            let scoop_bin = resolve_command_path("scoop");
+            println!("  {} Menjalankan: scoop install mpv yt-dlp ...", "ℹ".yellow());
+            let _ = Command::new(&scoop_bin)
+                .args(&["install", "mpv", "yt-dlp"])
+                .status();
         },
         _ => {},
     }
@@ -190,12 +386,28 @@ fn show_health_screen() -> anyhow::Result<bool> {
         } else if choice == '1' {
             let package_manager = detect_package_manager();
             if package_manager == "unknown" {
-                println!("\n{} Package manager tidak terdeteksi! Silahkan install mpv dan yt-dlp secara manual.", "■".red());
+                if cfg!(target_os = "windows") {
+                    println!("\n{} Tidak ditemukan package manager otomatis (winget / choco / scoop).", "■".red());
+                    println!("  Silahkan pilih salah satu opsi instalasi MPV untuk Windows:");
+                    println!("  1. Jalankan di PowerShell / CMD:");
+                    println!("     {}", "winget install --id shinchiro.mpv".cyan());
+                    println!("  2. Atau install via Scoop:");
+                    println!("     {}", "scoop install mpv".cyan());
+                    println!("  3. Atau unduh manual installer MPV di:");
+                    println!("     {}", "https://mpv.io/installation/".cyan());
+                    println!("\n  Ingin membuka halaman unduhan MPV di browser? (y/n)");
+                    let mut answer = String::new();
+                    if std::io::stdin().read_line(&mut answer).is_ok() && answer.trim().eq_ignore_ascii_case("y") {
+                        let _ = open::that("https://mpv.io/installation/");
+                    }
+                } else {
+                    println!("\n{} Package manager tidak terdeteksi! Silahkan install mpv dan yt-dlp secara manual.", "■".red());
+                }
             } else {
                 install_dependencies(package_manager);
             }
             
-            println!("  {} Selesai! Tekan Enter untuk melanjutkan.", "✓".green());
+            println!("\n  {} Tekan Enter untuk memeriksa kembali status dependensi.", "✓".green());
             let mut dummy = String::new();
             std::io::stdin().read_line(&mut dummy)?;
         }
@@ -383,6 +595,9 @@ fn execute_player(stream_url: &str, provider_type: usize, start_seconds: u64) ->
         0 => {
             println!("Sedang memutar video di MPV... (Tutup MPV untuk kembali ke menu)");
 
+            let track_script = mpv_track_script_path();
+            let last_pos_file = mpv_last_pos_file_path();
+
             let lua_script = format!(
                 r#"
 local last_pos = {}
@@ -399,15 +614,16 @@ end
 mp.add_periodic_timer(2, save)
 mp.register_event("shutdown", save)
 "#,
-                start_seconds, MPV_LAST_POS_FILE
+                start_seconds, last_pos_file
             );
-            let _ = std::fs::write(MPV_TRACK_SCRIPT, lua_script);
-            let _ = std::fs::remove_file(MPV_LAST_POS_FILE);
+            let _ = std::fs::write(&track_script, lua_script);
+            let _ = std::fs::remove_file(&last_pos_file);
 
-            let mut cmd = Command::new("mpv");
+            let mpv_bin = resolve_command_path("mpv");
+            let mut cmd = Command::new(&mpv_bin);
             cmd.arg("--hwdec=auto-safe");
             cmd.arg("--cache=yes");
-            cmd.arg(format!("--script={}", MPV_TRACK_SCRIPT));
+            cmd.arg(format!("--script={}", track_script));
 
             if start_seconds > 0 {
                 cmd.arg(format!("--start={}", start_seconds));
@@ -425,11 +641,13 @@ mp.register_event("shutdown", save)
                 cmd.arg("--demuxer-readahead-secs=30");
                 cmd.arg("--ytdl=no");
                 cmd.arg("--msg-level=ffmpeg/demuxer=error");
-                if std::path::Path::new(IDLIX_AUDIO_PATH).exists() {
-                    cmd.arg(format!("--audio-file={}", IDLIX_AUDIO_PATH));
+                let audio_file = idlix_audio_path();
+                if std::path::Path::new(&audio_file).exists() {
+                    cmd.arg(format!("--audio-file={}", audio_file));
                 }
-                if std::path::Path::new(IDLIX_SUBTITLE_PATH).exists() {
-                    cmd.arg(format!("--sub-file={}", IDLIX_SUBTITLE_PATH));
+                let sub_file = idlix_subtitle_path();
+                if std::path::Path::new(&sub_file).exists() {
+                    cmd.arg(format!("--sub-file={}", sub_file));
                 }
             } else if provider_type == PROVIDER_OTAKUDESU {
                 cmd.arg("--http-header-fields=Referer: https://desustream.net/");
@@ -445,17 +663,18 @@ mp.register_event("shutdown", save)
                 eprintln!("{} MPV tidak ditemukan!", "■".red());
             }
 
-            if let Ok(saved) = std::fs::read_to_string(MPV_LAST_POS_FILE) {
+            if let Ok(saved) = std::fs::read_to_string(&last_pos_file) {
                 if let Ok(pos) = saved.trim().parse::<u64>() {
                     final_pos = pos;
                 }
             }
-            let _ = std::fs::remove_file(MPV_LAST_POS_FILE);
-            let _ = std::fs::remove_file(MPV_TRACK_SCRIPT);
+            let _ = std::fs::remove_file(&last_pos_file);
+            let _ = std::fs::remove_file(&track_script);
         },
         1 => {
             println!("Sedang memutar video di VLC... (Tutup VLC untuk kembali ke menu)");
-            let mut cmd = Command::new("vlc");
+            let vlc_bin = resolve_command_path("vlc");
+            let mut cmd = Command::new(&vlc_bin);
             if start_seconds > 0 {
                 cmd.arg(format!("--start-time={}", start_seconds));
             }
@@ -568,7 +787,21 @@ fn handle_self_update() -> anyhow::Result<()> {
     println!("{} Memeriksa dan mengunduh pembaruan...", "◆".blue());
     println!("  Repository: {}\n", REPO_URL.cyan());
 
+    let bin_name = if cfg!(target_os = "windows") { "animeku-cli.exe" } else { "animeku-cli" };
     let is_git_repo = std::path::Path::new(".git").exists();
+
+    // On Windows, rename running executable before cargo install to avoid file locking
+    let mut renamed_old: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
+    if cfg!(target_os = "windows") {
+        if let Ok(current_exe) = std::env::current_exe() {
+            let old_exe = current_exe.with_extension("exe.old");
+            let _ = std::fs::remove_file(&old_exe);
+            if std::fs::rename(&current_exe, &old_exe).is_ok() {
+                renamed_old = Some((current_exe, old_exe));
+            }
+        }
+    }
+
     let status = if is_git_repo {
         println!("{} Terdeteksi repositori lokal. Menjalankan git pull & cargo install...", "ℹ".yellow());
         let _ = Command::new("git").args(["pull", "origin", "main"]).status();
@@ -586,12 +819,12 @@ fn handle_self_update() -> anyhow::Result<()> {
         Ok(s) if s.success() => {
             println!("\n  {} Pembaruan berhasil diinstal!", "✓".green());
             if let Some(home) = dirs::home_dir() {
-                let local_bin = home.join(".local/bin/animeku-cli");
+                let local_bin = home.join(".local/bin").join(bin_name);
                 let candidate_bins = [
-                    home.join(".cargo/bin/animeku-cli"),
-                    home.join(".local/share/rust-cargo/bin/animeku-cli"),
-                    std::path::PathBuf::from("target/release/animeku-cli"),
-                    std::path::PathBuf::from("target/debug/animeku-cli"),
+                    home.join(".cargo/bin").join(bin_name),
+                    home.join(".local/share/rust-cargo/bin").join(bin_name),
+                    std::path::PathBuf::from(format!("target/release/{}", bin_name)),
+                    std::path::PathBuf::from(format!("target/debug/{}", bin_name)),
                 ];
                 for candidate in candidate_bins {
                     if candidate.exists() && local_bin.exists() {
@@ -600,9 +833,15 @@ fn handle_self_update() -> anyhow::Result<()> {
                     }
                 }
             }
+            if let Some((_, old_exe)) = renamed_old {
+                let _ = std::fs::remove_file(old_exe);
+            }
             println!("  Silahkan jalankan ulang aplikasi.");
         }
         _ => {
+            if let Some((current_exe, old_exe)) = renamed_old {
+                let _ = std::fs::rename(old_exe, current_exe);
+            }
             println!("\n  {} Gagal memperbarui secara otomatis.", "■".red());
             println!("  Silahkan jalankan secara manual:");
             println!("  cargo install --git {} --force", REPO_URL);
@@ -789,3 +1028,22 @@ fn main() -> anyhow::Result<()> {
     });
     Ok(())
 }
+
+#[cfg(test)]
+mod main_tests {
+    use super::*;
+
+    #[test]
+    fn test_check_command_exists() {
+        assert!(check_command_exists("cargo"));
+        assert!(!check_command_exists("nonexistent_random_command_12345"));
+    }
+
+    #[test]
+    fn test_temp_file_paths() {
+        let p = idlix_audio_path();
+        assert!(p.contains("animeku_idlix_audio.m3u8"));
+        assert!(!p.contains('\\'));
+    }
+}
+
