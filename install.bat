@@ -142,7 +142,7 @@ if %ERRORLEVEL% EQU 0 (
         where winget >nul 2>&1
         if !ERRORLEVEL! EQU 0 (
             echo [INFO] Installing MPV automatically via winget...
-            winget install --id shinchiro.mpv -e --accept-package-agreements --accept-source-agreements
+            winget install --id shinchiro.mpv -e --source winget --accept-package-agreements --accept-source-agreements
         ) else (
             echo [INFO] Please install MPV from https://mpv.io/installation/
         )
