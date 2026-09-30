@@ -19,12 +19,41 @@ Streaming anime dan film Asia dengan subtitle Indonesia lewat terminal.
 > - **Linux**: `sudo apt install mpv` (Ubuntu/Debian) atau `sudo pacman -S mpv` (Arch).
 > - **Android (Termux)**: `pkg install rust mpv`.
 
-Langkah berikutnya silahkan *copy paste* teks dibawah:
+#### Auto Install (Windows — satu baris)
+
+Buka **PowerShell** atau **CMD** lalu jalankan perintah berikut:
+
+```powershell
+powershell -c "irm https://raw.githubusercontent.com/yuutaa7x/animeku-cli/refs/heads/main/install.bat -OutFile install.bat; .\install.bat"
+```
+
+Script akan otomatis menginstall Rust, GCC (via MSYS2), dan MPV jika belum ada, lalu build dan install animeku-cli.
+
+#### Manual Install (semua platform)
+
+*Copy paste* perintah berikut:
 ```bash
 cargo install --git https://github.com/yuutaa7x/animeku-cli
 ```
 
 Silahkan tunggu proses penginstallan selesai dan jika sudah, ketik `animeku-cli` untuk menjalankannya.
+
+### uninstall
+
+#### Auto Uninstall (Windows — satu baris)
+
+Buka **PowerShell** atau **CMD** lalu jalankan perintah berikut:
+
+```powershell
+powershell -c "irm https://raw.githubusercontent.com/yuutaa7x/animeku-cli/refs/heads/main/uninstall.bat -OutFile uninstall.bat; .\uninstall.bat"
+```
+
+#### Manual Uninstall (semua platform)
+
+```bash
+cargo uninstall animeku-cli
+```
+
 
 ### Keunggulan & Fitur
 - Sangat mudah digunakan langsung dari command line.
