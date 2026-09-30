@@ -256,6 +256,13 @@ fn install_dependencies(package_manager: &str) {
                 .args(&["apk", "add", "mpv", "yt-dlp"])
                 .status();
         },
+        "pkg" => {
+            // Termux (Android) — tidak butuh sudo
+            println!("  {} Menjalankan: pkg install mpv yt-dlp ...", "ℹ".yellow());
+            let _ = Command::new("pkg")
+                .args(&["install", "-y", "mpv", "yt-dlp"])
+                .status();
+        },
         "brew" => {
             let _ = Command::new("brew")
                 .args(&["install", "mpv", "yt-dlp"])
@@ -316,6 +323,10 @@ fn detect_package_manager() -> &'static str {
     } else if cfg!(target_os = "macos") {
         if check_command_exists("brew") { return "brew"; }
     } else {
+        // Termux (Android) uses pkg; check before apt-get since Termux also ships apt-get
+        if check_command_exists("pkg") && std::env::var("TERMUX_VERSION").is_ok() {
+            return "pkg";
+        }
         if check_command_exists("apt-get") { return "apt-get"; }
         if check_command_exists("pacman") { return "pacman"; }
         if check_command_exists("dnf") { return "dnf"; }
@@ -803,12 +814,36 @@ fn handle_self_update() -> anyhow::Result<()> {
     }
 
     let status = if is_git_repo {
+        if !check_command_exists("git") {
+            println!("\n  {} git tidak ditemukan di PATH.", "■".red());
+            println!("  Silahkan install git terlebih dahulu, lalu jalankan ulang update ini.");
+            println!("\nTekan Enter untuk kembali ke menu...");
+            let mut dummy = String::new();
+            let _ = std::io::stdin().read_line(&mut dummy);
+            return Ok(());
+        }
+        if !check_command_exists("cargo") {
+            println!("\n  {} cargo / Rust toolchain tidak ditemukan di PATH.", "■".red());
+            println!("  Install Rust dari https://rustup.rs/ lalu jalankan ulang update ini.");
+            println!("\nTekan Enter untuk kembali ke menu...");
+            let mut dummy = String::new();
+            let _ = std::io::stdin().read_line(&mut dummy);
+            return Ok(());
+        }
         println!("{} Terdeteksi repositori lokal. Menjalankan git pull & cargo install...", "ℹ".yellow());
         let _ = Command::new("git").args(["pull", "origin", "main"]).status();
         Command::new("cargo")
             .args(["install", "--path", ".", "--force"])
             .status()
     } else {
+        if !check_command_exists("cargo") {
+            println!("\n  {} cargo / Rust toolchain tidak ditemukan di PATH.", "■".red());
+            println!("  Install Rust dari https://rustup.rs/ lalu jalankan ulang update ini.");
+            println!("\nTekan Enter untuk kembali ke menu...");
+            let mut dummy = String::new();
+            let _ = std::io::stdin().read_line(&mut dummy);
+            return Ok(());
+        }
         println!("{} Mengunduh dan mengompilasi dari GitHub...", "◆".blue());
         Command::new("cargo")
             .args(["install", "--git", REPO_URL, "--force"])

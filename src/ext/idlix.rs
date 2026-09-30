@@ -20,7 +20,28 @@ const BANDWIDTH_1080P: u64 = 2_000_000;
 const BANDWIDTH_720P: u64 = 800_000;
 const BANDWIDTH_480P: u64 = 450_000;
 
+fn check_curl_available() -> anyhow::Result<()> {
+    // Try running `curl --version` to confirm the binary is reachable
+    let ok = Command::new("curl")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !ok {
+        anyhow::bail!(
+            "curl tidak ditemukan di sistem.\n\
+             Streaming Idlix memerlukan curl. Silahkan install:\n\
+             - Linux  : sudo apt install curl  /  sudo pacman -S curl  /  pkg install curl (Termux)\n\
+             - macOS  : brew install curl\n\
+             - Windows: curl sudah tersedia di Windows 10 1803+. Pastikan Windows kamu sudah diperbarui.\n\
+             Setelah install, jalankan ulang animeku-cli."
+        );
+    }
+    Ok(())
+}
+
 fn curl_get(url: &str) -> anyhow::Result<String> {
+    check_curl_available()?;
     let cookie_path = cookie_cache_path();
     let output = Command::new("curl")
         .args([
@@ -43,6 +64,7 @@ fn curl_get(url: &str) -> anyhow::Result<String> {
 }
 
 fn curl_post(url: &str, body: &Value) -> anyhow::Result<String> {
+    check_curl_available()?;
     let cookie_path = cookie_cache_path();
     let output = Command::new("curl")
         .args([
