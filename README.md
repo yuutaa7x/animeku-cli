@@ -10,9 +10,7 @@ Streaming anime dan film Asia dengan subtitle Indonesia lewat terminal.
 
 ### Tutorial Penggunaan
 
-🎥 **[Klik di sini untuk menonton Video Tutorial (AnonMP4)](https://anonmp4.art/embed/MnU3kDCdb58m5pM)**
-
-*(Catatan: GitHub tidak mengizinkan pemutaran video otomatis dari dalam repository lewat tag HTML, jadi silahkan klik link di atas untuk menonton).*
+https://github.com/user-attachments/assets/5d029903-ba1f-46c4-ab72-f021d8500a7c
 
 ### instalasi
 > [!NOTE]
