@@ -41,6 +41,16 @@ curl -sL https://raw.githubusercontent.com/yuutaa7x/animeku-cli/refs/heads/main/
 
 Script akan otomatis menginstall Rust dan MPV jika belum ada, lalu build dan install animeku-cli.
 
+#### Auto Install (Android / Termux — satu baris)
+
+Buka aplikasi Termux lalu jalankan:
+
+```bash
+curl -sL https://raw.githubusercontent.com/yuutaa7x/animeku-cli/refs/heads/main/install_termux.sh | bash
+```
+
+Script akan mengonfigurasi `termux-x11`, `mpv`, dan build animeku-cli agar video bisa diputar tanpa Desktop Environment.
+
 #### Manual Install (semua platform)
 
 *Copy paste* perintah berikut:
@@ -60,7 +70,7 @@ Buka **PowerShell** atau **CMD** lalu jalankan perintah berikut:
 powershell -c "irm https://raw.githubusercontent.com/yuutaa7x/animeku-cli/refs/heads/main/uninstall.bat -OutFile uninstall.bat; .\uninstall.bat"
 ```
 
-#### Auto Uninstall (Linux / macOS — satu baris)
+#### Auto Uninstall (Linux / macOS / Termux — satu baris)
 
 ```bash
 curl -sL https://raw.githubusercontent.com/yuutaa7x/animeku-cli/refs/heads/main/uninstall.sh | bash
