@@ -112,9 +112,33 @@ async fn handle_connection(socket: &mut TcpStream, port: u16, provider_id: usize
     let path = parts[1];
     
     if path.starts_with("/?sub=1") {
+        let sub_path = "/sdcard/Download/animeku_idlix.vtt";
+        let sub_path2 = crate::util::temp_file("animeku_idlix.vtt");
+        let active_path = if tokio::fs::metadata(sub_path).await.is_ok() { sub_path } else { &sub_path2 };
+        
+        let mut duration = 1440.0;
+        if let Ok(content) = tokio::fs::read_to_string(active_path).await {
+            if let Some(last_arrow) = content.rfind("-->") {
+                let after_arrow = &content[last_arrow + 3..];
+                let end_time_str = after_arrow.trim_start().split_whitespace().next().unwrap_or("");
+                let parts: Vec<&str> = end_time_str.split(':').collect();
+                if parts.len() == 3 {
+                    let h: f64 = parts[0].parse().unwrap_or(0.0);
+                    let m: f64 = parts[1].parse().unwrap_or(0.0);
+                    let s_parts: Vec<&str> = parts[2].split('.').collect();
+                    let s: f64 = s_parts[0].parse().unwrap_or(0.0);
+                    let ms: f64 = if s_parts.len() > 1 { s_parts[1].parse().unwrap_or(0.0) } else { 0.0 };
+                    let calc = h * 3600.0 + m * 60.0 + s + (ms / 1000.0);
+                    if calc > 0.0 {
+                        duration = calc;
+                    }
+                }
+            }
+        }
+
         let m3u8_content = format!(
-            "#EXTM3U\n#EXT-X-TARGETDURATION:99999\n#EXT-X-VERSION:3\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:99999.000,\nhttp://127.0.0.1:{}/?vtt=1\n#EXT-X-ENDLIST\n",
-            port
+            "#EXTM3U\n#EXT-X-TARGETDURATION:{}\n#EXT-X-VERSION:3\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:{:.3},\nhttp://127.0.0.1:{}/?vtt=1\n#EXT-X-ENDLIST\n",
+            duration.ceil() as u64, duration, port
         );
         let header = "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nConnection: close\r\n\r\n";
         socket.write_all(header.as_bytes()).await?;
