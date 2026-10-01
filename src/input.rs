@@ -1,6 +1,6 @@
 use std::fs;
 
-fn load_history() -> Vec<String> {
+pub fn load_history() -> Vec<String> {
     let mut history_items = vec![];
     if let Some(home) = dirs::home_dir() {
         let path = home.join(".animeku_history");
@@ -16,7 +16,7 @@ fn load_history() -> Vec<String> {
     history_items
 }
 
-fn save_history(title: &str) {
+pub fn save_history(title: &str) {
     if let Some(home) = dirs::home_dir() {
         let path = home.join(".animeku_history");
         let history = load_history();
@@ -50,28 +50,18 @@ pub fn save_last_watch(last_watch: &LastWatch) {
     }
 }
 
+/// Prompt untuk input judul baru (tanpa history dropdown).
+/// History disimpan di "Watch History" terpisah.
 pub fn get_user_input() -> anyhow::Result<Option<Input>> {
-    let mut options = vec!["[ Ketik Judul Pencarian Baru ]".to_string()];
-    options.extend(load_history());
-
-    let selection = dialoguer::FuzzySelect::with_theme(&crate::util::custom_theme())
-        .with_prompt("Pilih Rekomendasi/Histori, atau ketik baru (q untuk keluar)")
-        .items(&options)
-        .default(0)
+    let title: String = dialoguer::Input::with_theme(&crate::util::custom_theme())
+        .with_prompt("Masukan judul anime/movie (q untuk kembali)")
         .interact()?;
 
-    let title = if selection == 0 {
-        dialoguer::Input::with_theme(&crate::util::custom_theme())
-            .with_prompt("Masukan judul (ketik 'q' untuk keluar)")
-            .interact()?
-    } else {
-        options[selection].clone()
-    };
-    
     if title.trim().eq_ignore_ascii_case("q") {
         return Ok(None);
     }
-    save_history(&title);
+
+    save_history(title.trim());
 
     let tipe = dialoguer::FuzzySelect::with_theme(&crate::util::custom_theme())
         .with_prompt("Pilih Provider")
@@ -79,7 +69,7 @@ pub fn get_user_input() -> anyhow::Result<Option<Input>> {
         .default(0)
         .interact()?;
 
-    Ok(Some(Input { title, tipe }))
+    Ok(Some(Input { title: title.trim().to_string(), tipe }))
 }
 
 pub fn choice<T: std::fmt::Display + Clone>(options: Vec<T>, _fuzzy: bool) -> anyhow::Result<T> {

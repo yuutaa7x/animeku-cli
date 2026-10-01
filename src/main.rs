@@ -6,7 +6,7 @@ use colored::Colorize;
 use ext::Ext;
 use tokio::runtime;
 
-use crate::{input::get_user_input, util::clearscreen_and_show_banner};
+use crate::{input::{get_user_input, load_history, save_history}, util::clearscreen_and_show_banner};
 
 mod animeku;
 mod ext;
@@ -921,79 +921,141 @@ async fn handle_search_and_watch(discord: &mut Option<DiscordIpcClient>) -> anyh
 }
 
 async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> anyhow::Result<()> {
-    clearscreen_and_show_banner()?;
-    let last_watch_opt = input::load_last_watch();
-    let last_watch = match last_watch_opt {
-        Some(lw) => lw,
-        None => {
-            println!("Riwayat Tontonan Terakhir:\n");
-            println!("  Belum ada riwayat tontonan yang tersimpan.\n");
+    loop {
+        clearscreen_and_show_banner()?;
+
+        let last_watch_opt = input::load_last_watch();
+        let history = load_history();
+
+        // Build menu: last watch resume (if any) + all history titles + back
+        let mut menu_items: Vec<String> = Vec::new();
+
+        if let Some(ref lw) = last_watch_opt {
+            let provider_name = if lw.provider_type == PROVIDER_OTAKUDESU { "Otakudesu" } else { "Idlix" };
+            menu_items.push(format!(
+                "[ Lanjutkan: {} - {} | {} | {} ]",
+                lw.movie.title.trim(),
+                lw.episode.title.trim(),
+                lw.format_duration(),
+                provider_name
+            ));
+        }
+
+        if history.is_empty() && last_watch_opt.is_none() {
+            println!("Belum ada riwayat tontonan.\n");
             println!("Tekan Enter untuk kembali...");
             let mut dummy = String::new();
             let _ = std::io::stdin().read_line(&mut dummy);
             return Ok(());
         }
-    };
 
-    println!("Riwayat Tontonan Terakhir:");
-    println!("  Judul    : {}", last_watch.movie.title.trim());
-    println!("  Episode  : {}", last_watch.episode.title.trim());
-    println!("  Posisi   : {}", last_watch.format_duration());
-    let provider_name = if last_watch.provider_type == PROVIDER_OTAKUDESU {
-        "Otakudesu"
-    } else {
-        "Idlix"
-    };
-    println!("  Provider : {}\n", provider_name);
+        for title in &history {
+            menu_items.push(format!("  {}", title));
+        }
+        menu_items.push("  Kembali".to_string());
 
-    let actions = [
-        format!("1. Lanjutkan Menonton (mulai {})", last_watch.format_duration()),
-        "2. Putar Ulang dari Awal (00:00)".to_string(),
-        "3. Kembali".to_string(),
-    ];
+        let choice = dialoguer::Select::with_theme(&crate::util::custom_theme())
+            .with_prompt("Watch History:")
+            .default(0)
+            .items(&menu_items)
+            .interact()?;
 
-    let action_choice = dialoguer::Select::with_theme(&crate::util::custom_theme())
-        .with_prompt("Pilih Aksi:")
-        .default(0)
-        .items(&actions)
-        .interact()?;
+        let last_watch_offset = if last_watch_opt.is_some() { 1 } else { 0 };
+        let back_index = menu_items.len() - 1;
 
-    let start_seconds = match action_choice {
-        0 => last_watch.position_seconds,
-        1 => 0,
-        _ => return Ok(()),
-    };
+        if choice == back_index {
+            break;
+        }
 
-    clearscreen_and_show_banner()?;
+        // Pilih lanjutkan last watch
+        if last_watch_opt.is_some() && choice == 0 {
+            let last_watch = last_watch_opt.unwrap();
+            clearscreen_and_show_banner()?;
 
-    let season_num = if last_watch.episode.is_series {
-        detect_season(&last_watch.movie.title, "", &[]).unwrap_or(1)
-    } else {
-        1
-    };
+            println!("Riwayat Tontonan Terakhir:");
+            println!("  Judul    : {}", last_watch.movie.title.trim());
+            println!("  Episode  : {}", last_watch.episode.title.trim());
+            println!("  Posisi   : {}", last_watch.format_duration());
+            let provider_name = if last_watch.provider_type == PROVIDER_OTAKUDESU { "Otakudesu" } else { "Idlix" };
+            println!("  Provider : {}\n", provider_name);
 
-    update_discord_status(
-        discord,
-        &last_watch.movie.title,
-        &last_watch.episode.title,
-        last_watch.episode.is_series,
-        season_num,
-        None,
-    );
+            let actions = [
+                format!("1. Lanjutkan Menonton (mulai {})", last_watch.format_duration()),
+                "2. Putar Ulang dari Awal (00:00)".to_string(),
+                "3. Kembali".to_string(),
+            ];
 
-    let mut animeku = AnimekuCli::new(get_ext_by_provider(last_watch.provider_type));
-    let stream_opt = animeku.extract_stream_urls(last_watch.episode.clone()).await?;
-    if let Some(stream) = stream_opt {
-        let final_pos = execute_player(&stream.url, last_watch.provider_type, start_seconds)?;
-        input::save_last_watch(&crate::models::LastWatch {
-            movie: last_watch.movie.clone(),
-            episode: last_watch.episode.clone(),
-            provider_type: last_watch.provider_type,
-            position_seconds: final_pos,
-        });
+            let action_choice = dialoguer::Select::with_theme(&crate::util::custom_theme())
+                .with_prompt("Pilih Aksi:")
+                .default(0)
+                .items(&actions)
+                .interact()?;
+
+            let start_seconds = match action_choice {
+                0 => last_watch.position_seconds,
+                1 => 0,
+                _ => continue,
+            };
+
+            clearscreen_and_show_banner()?;
+
+            let season_num = if last_watch.episode.is_series {
+                detect_season(&last_watch.movie.title, "", &[]).unwrap_or(1)
+            } else {
+                1
+            };
+
+            update_discord_status(
+                discord,
+                &last_watch.movie.title,
+                &last_watch.episode.title,
+                last_watch.episode.is_series,
+                season_num,
+                None,
+            );
+
+            let mut animeku = AnimekuCli::new(get_ext_by_provider(last_watch.provider_type));
+            let stream_opt = animeku.extract_stream_urls(last_watch.episode.clone()).await?;
+            if let Some(stream) = stream_opt {
+                let final_pos = execute_player(&stream.url, last_watch.provider_type, start_seconds)?;
+                input::save_last_watch(&crate::models::LastWatch {
+                    movie: last_watch.movie.clone(),
+                    episode: last_watch.episode.clone(),
+                    provider_type: last_watch.provider_type,
+                    position_seconds: final_pos,
+                });
+            }
+
+            reset_discord_status(discord);
+
+        } else {
+            // Pilih dari history — langsung search judul tersebut
+            let history_index = choice - last_watch_offset;
+            let selected_title = history[history_index].clone();
+
+            // Pilih provider
+            let tipe = dialoguer::FuzzySelect::with_theme(&crate::util::custom_theme())
+                .with_prompt(format!("Provider untuk \"{}\":", selected_title))
+                .item("Idlix (Animation & Movies)").item("Otakudesu")
+                .default(0)
+                .interact()?;
+
+            save_history(&selected_title);
+
+            let input_data = crate::models::Input { title: selected_title, tipe };
+            let extractor = get_ext(&input_data);
+            let mut animeku = AnimekuCli::new(extractor);
+
+            loop {
+                clearscreen_and_show_banner()?;
+                let movie = match animeku.search(&input_data.title).await? {
+                    Some(m) => m,
+                    None => break,
+                };
+                handle_movie_episodes(&mut animeku, &movie, input_data.tipe, discord).await?;
+            }
+        }
     }
-
-    reset_discord_status(discord);
     Ok(())
 }
 
@@ -1002,7 +1064,7 @@ async fn handle_watch_mode(discord: &mut Option<DiscordIpcClient>) -> anyhow::Re
         clearscreen_and_show_banner()?;
         let menu_items = [
             "1. Watch Any Anime / Movie",
-            "2. Watch Last Anime / Movie",
+            "2. Watch Last Anime / Movie [Watch History]",
             "3. Kembali ke Menu Utama",
         ];
 
