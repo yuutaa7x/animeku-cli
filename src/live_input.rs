@@ -22,23 +22,38 @@ async fn fetch_suggestions(query: String, tx: mpsc::Sender<FetchResult>) {
         return;
     }
     
-    // Use Jikan API for anime suggestions
+    // Create client with timeout and User-Agent (some APIs block default agents or hang)
+    let client = match reqwest::Client::builder()
+        .user_agent("animeku-cli/0.2.0")
+        .timeout(Duration::from_secs(4))
+        .build() 
+    {
+        Ok(c) => c,
+        Err(_) => {
+            let _ = tx.send(FetchResult::Error(query)).await;
+            return;
+        }
+    };
+
     let url = format!("https://api.jikan.moe/v4/anime?q={}&limit=5", urlencoding::encode(&query));
-    match reqwest::get(&url).await {
+    match client.get(&url).send().await {
         Ok(res) => {
-            if let Ok(json) = res.json::<serde_json::Value>().await {
-                let mut titles = vec![];
-                if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
-                    for item in data {
-                        if let Some(title) = item.get("title").and_then(|t| t.as_str()) {
-                            titles.push(title.to_string());
+            if res.status().is_success() {
+                if let Ok(json) = res.json::<serde_json::Value>().await {
+                    let mut titles = vec![];
+                    if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
+                        for item in data {
+                            if let Some(title) = item.get("title").and_then(|t| t.as_str()) {
+                                titles.push(title.to_string());
+                            }
                         }
                     }
+                    let _ = tx.send(FetchResult::Success(query, titles)).await;
+                    return;
                 }
-                let _ = tx.send(FetchResult::Success(query, titles)).await;
-            } else {
-                let _ = tx.send(FetchResult::Error(query)).await;
             }
+            // If not success or failed to parse
+            let _ = tx.send(FetchResult::Error(query)).await;
         }
         Err(_) => {
             let _ = tx.send(FetchResult::Error(query)).await;
