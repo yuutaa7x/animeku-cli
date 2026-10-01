@@ -639,6 +639,13 @@ mp.register_event("shutdown", save)
 
             let mpv_bin = resolve_command_path("mpv");
             let mut cmd = Command::new(&mpv_bin);
+
+            if std::env::var("TERMUX_VERSION").is_ok() {
+                cmd.env("DISPLAY", ":0");
+                cmd.arg("--vo=gpu");
+                cmd.arg("--gpu-context=x11");
+            }
+
             cmd.arg("--hwdec=auto-safe");
             cmd.arg("--cache=yes");
             cmd.arg(format!("--script={}", track_script));
