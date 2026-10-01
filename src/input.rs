@@ -156,7 +156,7 @@ const NEW_SEARCH_LABEL: &str = "[ Cari judul baru... ]";
 
 /// Prompt untuk input judul baru (tanpa history dropdown).
 /// History disimpan di "Watch History" terpisah.
-pub fn get_user_input() -> anyhow::Result<Option<Input>> {
+pub async fn get_user_input() -> anyhow::Result<Option<Input>> {
     let history = load_history();
 
     // Build items: first option is always "new search", rest are history
@@ -173,11 +173,10 @@ pub fn get_user_input() -> anyhow::Result<Option<Input>> {
         // User pressed Escape / closed
         None => return Ok(None),
         Some(0) => {
-            // "New search" selected → free text input
-            let raw: String = dialoguer::Input::with_theme(&crate::util::custom_theme())
-                .with_prompt("Masukan judul anime/movie (q untuk kembali)")
-                .interact()?;
-            if raw.trim().eq_ignore_ascii_case("q") {
+            // "New search" selected → use custom live async autocomplete!
+            let res = crate::live_input::get_live_input("Masukan judul anime/movie").await?;
+            let raw = res.unwrap_or_default();
+            if raw.trim().eq_ignore_ascii_case("q") || raw.trim().is_empty() {
                 return Ok(None);
             }
             raw.trim().to_string()

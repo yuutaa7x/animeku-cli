@@ -23,7 +23,10 @@ regex = "1.10.3"
 reqwest = { version = "0.11.24", features = ["json", "cookies"] }
 serde_json = "1.0.113"
 serde = { version = "1.0", features = ["derive"] }
-tokio = { version = "1.36.0", features = ["rt-multi-thread"] }
+tokio = { version = "1.36.0", features = ["full", "rt-multi-thread"] }
 viuer = "0.7.1"
 discord-rich-presence = "1.1.0"
 dirs = "7.0.0"
+crossterm = { version = "0.29.0", features = ["event-stream"] }
+tokio-stream = "0.1.19"
+futures = "0.3.34"

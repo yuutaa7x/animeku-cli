@@ -13,6 +13,7 @@ mod ext;
 mod input;
 mod models;
 mod util;
+mod live_input;
 
 const DISCORD_APP_ID: &str = "1549897147577667784";
 const DEFAULT_DISCORD_LOGO: &str = "logoanimekucli";
@@ -948,7 +949,7 @@ fn handle_self_update() -> anyhow::Result<()> {
 async fn handle_search_and_watch(discord: &mut Option<DiscordIpcClient>) -> anyhow::Result<()> {
     loop {
         clearscreen_and_show_banner()?;
-        let input = match get_user_input()? {
+        let input = match get_user_input().await? {
             Some(user_input) => user_input,
             None => break, // Back to watch submenu
         };
