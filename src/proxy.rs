@@ -181,7 +181,7 @@ async fn handle_connection(socket: &mut TcpStream, port: u16, provider_id: usize
     let content_type = if is_m3u8 {
         "application/vnd.apple.mpegurl"
     } else {
-        "video/MP2T"
+        "application/octet-stream"
     };
 
     let log_msg = format!("URL: {}\nLength: {}\nis_m3u8: {}\nSnippet: {}\n\n", 
