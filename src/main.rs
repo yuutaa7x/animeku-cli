@@ -1123,7 +1123,7 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
                 continue;
             }
 
-            let tipe = pick_provider()?;
+            let tipe = pick_provider(&selected_title).await?;
             save_history(&selected_title);
 
             let input_data = crate::models::Input { title: selected_title, tipe };

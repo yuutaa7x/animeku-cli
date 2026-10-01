@@ -124,29 +124,45 @@ pub fn delete_watch_entry(index: usize) {
 /// Tanya jenis konten → tentukan provider.
 /// Movie / Series → Idlix otomatis.
 /// Anime → pilih Idlix atau Otakudesu.
-pub fn pick_provider() -> anyhow::Result<usize> {
-    let content_type = dialoguer::Select::with_theme(&crate::util::custom_theme())
-        .with_prompt("Jenis konten")
-        .items(&[
-            "Movie",
-            "Series (Live Action / Drama)",
-            "Anime",
-        ])
-        .default(2)
-        .interact()?;
+pub async fn pick_provider(title: &str) -> anyhow::Result<usize> {
+    use std::io::Write;
+    use crossterm::style::Stylize;
+    
+    print!("{} Mendeteksi jenis konten... ", "◆".blue());
+    std::io::stdout().flush().unwrap();
 
-    match content_type {
-        // Movie atau Series → Idlix saja
-        0 | 1 => Ok(0), // PROVIDER_IDLIX
-        // Anime → tawarkan Idlix atau Otakudesu
-        _ => {
-            let provider = dialoguer::Select::with_theme(&crate::util::custom_theme())
-                .with_prompt("Pilih Provider")
-                .items(&["Idlix (Anime & Movies)", "Otakudesu (Anime)"])
-                .default(0)
-                .interact()?;
-            Ok(provider)
+    let query_payload = serde_json::json!({
+        "query": "query ($search: String) { Media(search: $search, type: ANIME, sort: POPULARITY_DESC) { id } }",
+        "variables": { "search": title }
+    });
+
+    let mut is_anime = false;
+    if let Ok(client) = reqwest::Client::builder().timeout(std::time::Duration::from_secs(3)).build() {
+        if let Ok(res) = client.post("https://graphql.anilist.co").json(&query_payload).send().await {
+            if res.status().is_success() {
+                if let Ok(json) = res.json::<serde_json::Value>().await {
+                    if let Some(media) = json.pointer("/data/Media") {
+                        if !media.is_null() {
+                            is_anime = true;
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    if is_anime {
+        println!("\r{} Terdeteksi sebagai: {}                     ", "✓".green(), "Anime".cyan());
+        let provider = dialoguer::Select::with_theme(&crate::util::custom_theme())
+            .with_prompt("Pilih Provider")
+            .items(&["Idlix (Anime & Movies)", "Otakudesu (Anime)"])
+            .default(0)
+            .interact()?;
+        Ok(provider)
+    } else {
+        println!("\r{} Terdeteksi sebagai: {}                     ", "✓".green(), "Movie/Series (Non-Anime)".yellow());
+        // Default to Idlix for movies/series
+        Ok(0)
     }
 }
 
@@ -193,7 +209,7 @@ pub async fn get_user_input() -> anyhow::Result<Option<Input>> {
 
     save_history(&title);
 
-    let tipe = pick_provider()?;
+    let tipe = pick_provider(&title).await?;
 
     Ok(Some(Input { title, tipe }))
 }
