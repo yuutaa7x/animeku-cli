@@ -99,6 +99,24 @@ async fn handle_connection(socket: &mut TcpStream, client: Arc<Client>, port: u1
     let mut req = client.get(&target_url);
     if provider_id == crate::PROVIDER_OTAKUDESU {
         req = req.header("Referer", "https://desustream.net/");
+    } else {
+        req = req.header("Referer", "https://idlixku.com/");
+        
+        // Parse Netscape cookies for IDLIX
+        let cookie_path = crate::util::temp_file("animeku_idlix_cookies.txt");
+        let mut cookies = Vec::new();
+        if let Ok(content) = std::fs::read_to_string(cookie_path) {
+            for line in content.lines() {
+                if line.is_empty() || line.starts_with("# ") || line == "#" { continue; }
+                let parts: Vec<&str> = line.split('\t').collect();
+                if parts.len() >= 7 {
+                    cookies.push(format!("{}={}", parts[5], parts[6]));
+                }
+            }
+        }
+        if !cookies.is_empty() {
+            req = req.header("Cookie", cookies.join("; "));
+        }
     }
 
     let mut res = match req.send().await {
