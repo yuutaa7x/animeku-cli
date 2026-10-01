@@ -751,8 +751,20 @@ mp.register_event("shutdown", save)
                     std::thread::sleep(std::time::Duration::from_secs(3));
                 } else {
                     println!("Proxy berjalan di port {}. Silahkan tonton di aplikasi pilihanmu!", proxy_port);
-                    println!("Catatan: Proxy akan mati otomatis saat kamu kembali ke menu utama.");
-                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    println!("\n{} Jangan tutup layar ini selama menonton agar proxy tetap hidup.", "ℹ".yellow());
+                    println!("Jika sudah selesai menonton, tekan Enter untuk kembali...");
+                    let mut dummy = String::new();
+                    let _ = std::io::stdin().read_line(&mut dummy);
+                    
+                    print!("Simpan posisi terakhir tontonan (dalam menit)? (Kosongkan jika sudah tamat): ");
+                    stdout().flush().unwrap_or(());
+                    let mut pos_input = String::new();
+                    let _ = std::io::stdin().read_line(&mut pos_input);
+                    if let Ok(m) = pos_input.trim().parse::<u64>() {
+                        final_pos = m * 60;
+                    } else if pos_input.trim().is_empty() {
+                        final_pos = 0;
+                    }
                 }
             } else {
                 println!("Sedang memutar video di VLC... (Tutup VLC untuk kembali ke menu)");
@@ -768,6 +780,16 @@ mp.register_event("shutdown", save)
                 if let Ok(status) = cmd.arg(stream_url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status() {
                     if !status.success() { eprintln!("{} Gagal memutar video di VLC", "■".red()); }
                 } else { eprintln!("{} VLC tidak ditemukan!", "■".red()); }
+                
+                print!("Simpan posisi terakhir tontonan (dalam menit)? (Kosongkan jika sudah tamat): ");
+                stdout().flush().unwrap_or(());
+                let mut pos_input = String::new();
+                let _ = std::io::stdin().read_line(&mut pos_input);
+                if let Ok(m) = pos_input.trim().parse::<u64>() {
+                    final_pos = m * 60;
+                } else if pos_input.trim().is_empty() {
+                    final_pos = 0;
+                }
             }
         },
         2 => {
