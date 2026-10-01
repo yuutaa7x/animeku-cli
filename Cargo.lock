@@ -41,7 +41,7 @@ dependencies = [
 
 [[package]]
 name = "animeku-cli"
-version = "0.1.45"
+version = "0.1.46"
 dependencies = [
  "anyhow",
  "async-trait",

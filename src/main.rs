@@ -38,7 +38,8 @@ const PROVIDER_OTAKUDESU: usize = 1;
 const REPO_URL: &str = "https://github.com/yuutaa7x/animeku-cli";
 const MENU_UPDATE: usize = 0;
 const MENU_WATCH: usize = 1;
-const MENU_EXIT: usize = 2;
+const MENU_HEALTH: usize = 2;
+const MENU_EXIT: usize = 3;
 
 fn get_ext_by_provider(provider_type: usize) -> Box<dyn Ext> {
     match provider_type {
@@ -786,7 +787,8 @@ fn show_main_menu() -> anyhow::Result<usize> {
     let items = [
         "1. Update Animeku-CLI",
         "2. Go Watch Anime / Movie",
-        "3. Exit",
+        "3. Check Health",
+        "4. Exit",
     ];
 
     let choice = dialoguer::Select::with_theme(&crate::util::custom_theme())
@@ -1047,6 +1049,9 @@ async fn run_app() -> anyhow::Result<()> {
             }
             MENU_WATCH => {
                 handle_watch_mode(&mut discord).await?;
+            }
+            MENU_HEALTH => {
+                let _ = show_health_screen()?;
             }
             MENU_EXIT => {
                 println!("\nSampai jumpa lagi!\n");
