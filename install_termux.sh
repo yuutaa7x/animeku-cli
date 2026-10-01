@@ -13,7 +13,8 @@ pkg upgrade -y
 
 echo "[2/4] Menginstall Dependensi (Rust)..."
 # Termux di-setting untuk memakai Native Android Video Player (VLC / MX Player)
-pkg install rust binutils -y
+# pkg-config dan openssl dibutuhkan untuk mengompilasi library reqwest
+pkg install rust binutils pkg-config openssl -y
 
 echo "[3/4] Build & Install Animeku-CLI..."
 cargo install --git https://github.com/yuutaa7x/animeku-cli
