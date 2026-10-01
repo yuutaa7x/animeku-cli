@@ -159,7 +159,7 @@ async fn handle_connection(socket: &mut TcpStream, port: u16, provider_id: usize
     if provider_id == crate::PROVIDER_OTAKUDESU {
         cmd.args(&["-e", "https://desustream.net/"]);
     } else {
-        cmd.args(&["-e", "https://idlixku.com/"]);
+        cmd.args(&["-e", "https://z2.idlixku.com/"]);
         let cookie_path = crate::util::temp_file("animeku_idlix_cookies.txt");
         cmd.args(&["-b", &cookie_path]);
     }
