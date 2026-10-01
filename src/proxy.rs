@@ -1,24 +1,15 @@
 use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use reqwest::Client;
-use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 
 pub async fn start_proxy(provider_id: usize) -> anyhow::Result<u16> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
-    
-    let client = Arc::new(
-        Client::builder()
-            .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            .build()?
-    );
 
     tokio::spawn(async move {
         loop {
             if let Ok((mut socket, _)) = listener.accept().await {
-                let client = client.clone();
                 tokio::spawn(async move {
-                    let _ = handle_connection(&mut socket, client, port, provider_id).await;
+                    let _ = handle_connection(&mut socket, port, provider_id).await;
                 });
             }
         }
@@ -68,7 +59,6 @@ fn rewrite_m3u8(text: &str, target_url: &str, port: u16) -> String {
             rewritten.push_str(trimmed);
             rewritten.push('\n');
         } else {
-            // Segment or child playlist
             rewritten.push_str(&wrap_url(target_url, trimmed, port));
             rewritten.push('\n');
         }
@@ -76,9 +66,9 @@ fn rewrite_m3u8(text: &str, target_url: &str, port: u16) -> String {
     rewritten
 }
 
-async fn handle_connection(socket: &mut TcpStream, client: Arc<Client>, port: u16, provider_id: usize) -> anyhow::Result<()> {
+async fn handle_connection(socket: &mut TcpStream, port: u16, provider_id: usize) -> anyhow::Result<()> {
     let mut buf = [0; 4096];
-    let n = socket.read(&mut buf).await?;
+    let n = tokio::io::AsyncReadExt::read(socket, &mut buf).await?;
     let request = String::from_utf8_lossy(&buf[..n]);
     
     let mut lines = request.lines();
@@ -96,53 +86,52 @@ async fn handle_connection(socket: &mut TcpStream, client: Arc<Client>, port: u1
     let encoded_url = &path[6..];
     let target_url = urlencoding::decode(encoded_url)?.into_owned();
 
-    let mut req = client.get(&target_url);
-    if provider_id == crate::PROVIDER_OTAKUDESU {
-        req = req.header("Referer", "https://desustream.net/");
+    let is_m3u8 = target_url.contains(".m3u8");
+    let content_type = if is_m3u8 {
+        "application/vnd.apple.mpegurl"
+    } else if target_url.contains(".ts") {
+        "video/MP2T"
     } else {
-        req = req.header("Referer", "https://idlixku.com/");
-        
-        // Parse Netscape cookies for IDLIX
-        let cookie_path = crate::util::temp_file("animeku_idlix_cookies.txt");
-        let mut cookies = Vec::new();
-        if let Ok(content) = std::fs::read_to_string(cookie_path) {
-            for line in content.lines() {
-                if line.is_empty() || line.starts_with("# ") || line == "#" { continue; }
-                let parts: Vec<&str> = line.split('\t').collect();
-                if parts.len() >= 7 {
-                    cookies.push(format!("{}={}", parts[5], parts[6]));
-                }
-            }
-        }
-        if !cookies.is_empty() {
-            req = req.header("Cookie", cookies.join("; "));
-        }
-    }
+        "application/octet-stream"
+    };
 
-    let mut res = match req.send().await {
-        Ok(r) => r,
+    let mut cmd = tokio::process::Command::new("curl");
+    cmd.args(&[
+        "-s",
+        "-L",
+        "-A", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    ]);
+
+    if provider_id == crate::PROVIDER_OTAKUDESU {
+        cmd.args(&["-e", "https://desustream.net/"]);
+    } else {
+        cmd.args(&["-e", "https://idlixku.com/"]);
+        let cookie_path = crate::util::temp_file("animeku_idlix_cookies.txt");
+        cmd.args(&["-b", &cookie_path]);
+    }
+    
+    cmd.arg(&target_url);
+    cmd.stdout(std::process::Stdio::piped());
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
         Err(_) => return Ok(()),
     };
 
-    let status = res.status().as_u16();
-    let content_type = res.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("application/octet-stream").to_string();
-    let is_m3u8 = target_url.contains(".m3u8") || content_type.contains("mpegurl") || content_type.contains("x-mpegURL");
+    let mut stdout = child.stdout.take().unwrap();
 
-    let header = format!("HTTP/1.1 {} OK\r\nContent-Type: {}\r\nConnection: close\r\n\r\n", status, content_type);
+    let header = format!("HTTP/1.1 200 OK\r\nContent-Type: {}\r\nConnection: close\r\n\r\n", content_type);
     socket.write_all(header.as_bytes()).await?;
 
     if is_m3u8 {
-        if let Ok(text) = res.text().await {
-            let rewritten = rewrite_m3u8(&text, &target_url, port);
-            socket.write_all(rewritten.as_bytes()).await?;
-        }
+        let mut text = String::new();
+        let _ = tokio::io::AsyncReadExt::read_to_string(&mut stdout, &mut text).await;
+        let rewritten = rewrite_m3u8(&text, &target_url, port);
+        socket.write_all(rewritten.as_bytes()).await?;
     } else {
-        while let Ok(Some(chunk)) = res.chunk().await {
-            if socket.write_all(&chunk).await.is_err() {
-                break;
-            }
-        }
+        let _ = tokio::io::copy(&mut stdout, socket).await;
     }
+    let _ = child.wait().await;
 
     Ok(())
 }
