@@ -12,6 +12,7 @@ mod animeku;
 mod ext;
 mod input;
 mod models;
+mod proxy;
 mod util;
 mod live_input;
 
@@ -34,7 +35,7 @@ fn mpv_last_pos_file_path() -> String {
 }
 
 const PROVIDER_IDLIX: usize = 0;
-const PROVIDER_OTAKUDESU: usize = 1;
+pub const PROVIDER_OTAKUDESU: usize = 1;
 
 const REPO_URL: &str = "https://github.com/yuutaa7x/animeku-cli";
 const MENU_UPDATE: usize = 0;
@@ -597,14 +598,14 @@ fn reset_discord_status(discord: &mut Option<DiscordIpcClient>) {
     }
 }
 
-fn execute_player(stream_url: &str, provider_type: usize, start_seconds: u64) -> anyhow::Result<u64> {
+async fn execute_player(stream_url: &str, provider_type: usize, start_seconds: u64) -> anyhow::Result<u64> {
     print!("{} Membuka tautan diaplikasi eksternal .. \n", "◆".blue());
     stdout().flush()?;
 
     let is_android = std::env::var("TERMUX_VERSION").is_ok();
 
     let menu_items = if is_android {
-        vec!["Putar di MX Player (Anti-Blokir)", "Buka di Browser", "Kembali"]
+        vec!["Putar di VLC / Pemutar Android", "Buka di Browser", "Kembali"]
     } else {
         vec!["Putar dengan MPV", "Putar dengan VLC", "Buka di Browser", "Kembali"]
     };
@@ -724,41 +725,34 @@ mp.register_event("shutdown", save)
         },
         1 => {
             if is_android {
-                println!("Membuka video di MX Player...");
+                println!("Membuka aplikasi video player bawaan Android (VLC)...");
                 
                 // Simpan subtitle ke folder Download agar user bisa nge-load manual
                 let sub_path = "/sdcard/Download/animeku_idlix.vtt";
                 if std::path::Path::new(sub_path).exists() {
-                    println!("{} Subtitle disimpan di folder Download (animeku_idlix.vtt). Silahkan load manual di MX Player.", "ℹ".yellow());
+                    println!("{} Subtitle disimpan di folder Download (animeku_idlix.vtt). Silahkan load manual di VLC.", "ℹ".yellow());
                 }
 
-                // Injeksi Header ke dalam URL khusus untuk MX Player (dipisah dengan '|')
-                let mx_url = if provider_type == PROVIDER_OTAKUDESU {
-                    format!("{}|User-Agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36&Referer=https://desustream.net/", stream_url)
-                } else {
-                    // IDLIX
-                    format!("{}|User-Agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", stream_url)
-                };
+                // Kita nyalakan Local HTTP Proxy untuk memanipulasi Header!
+                let proxy_port = crate::proxy::start_proxy(provider_type).await.unwrap_or(8080);
+                let encoded_url = urlencoding::encode(stream_url);
+                let proxy_url = format!("http://127.0.0.1:{}/?url={}", proxy_port, encoded_url);
 
-                // Coba buka dengan MX Player versi gratis (com.mxtech.videoplayer.ad)
-                let status = Command::new("am")
-                    .args(&["start", "-a", "android.intent.action.VIEW", "-d", &mx_url, "-n", "com.mxtech.videoplayer.ad/.ActivityScreen"])
+                // Buka menggunakan termux-open dengan MIME video/* 
+                // Karena kita pakai http://127.0.0.1, VLC tidak butuh Header lagi, Proxy yang urus!
+                let status = Command::new("termux-open")
+                    .args(&["--content-type", "video/*", "--chooser", &proxy_url])
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status();
                 
                 if status.is_err() || !status.unwrap().success() {
-                    // Jika gagal, coba versi Pro (com.mxtech.videoplayer.pro)
-                    let status_pro = Command::new("am")
-                        .args(&["start", "-a", "android.intent.action.VIEW", "-d", &mx_url, "-n", "com.mxtech.videoplayer.pro/.ActivityScreen"])
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status();
-                        
-                    if status_pro.is_err() || !status_pro.unwrap().success() {
-                        eprintln!("{} Gagal memanggil MX Player! Apakah aplikasinya sudah di-install?", "■".red());
-                        std::thread::sleep(std::time::Duration::from_secs(3));
-                    }
+                    eprintln!("{} Gagal memanggil termux-open. Pastikan VLC sudah di-install.", "■".red());
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                } else {
+                    println!("Proxy berjalan di port {}. Silahkan tonton di aplikasi pilihanmu!", proxy_port);
+                    println!("Catatan: Proxy akan mati otomatis saat kamu kembali ke menu utama.");
+                    std::thread::sleep(std::time::Duration::from_secs(5));
                 }
             } else {
                 println!("Sedang memutar video di VLC... (Tutup VLC untuk kembali ke menu)");
@@ -865,7 +859,7 @@ async fn handle_movie_episodes(
 
             let stream_opt = animeku.extract_stream_urls(episode.clone()).await?;
             if let Some(stream) = stream_opt {
-                let last_pos = execute_player(&stream.url, provider_type, 0)?;
+                let last_pos = execute_player(&stream.url, provider_type, 0).await?;
                 input::save_watch_entry(&crate::models::WatchEntry {
                     movie: movie.clone(),
                     episode: episode.clone(),
@@ -1156,7 +1150,7 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
             let mut animeku = AnimekuCli::new(get_ext_by_provider(selected_watch.provider_type));
             let stream_opt = animeku.extract_stream_urls(selected_watch.episode.clone()).await?;
             if let Some(stream) = stream_opt {
-                let final_pos = execute_player(&stream.url, selected_watch.provider_type, start_seconds)?;
+                let final_pos = execute_player(&stream.url, selected_watch.provider_type, start_seconds).await?;
                 input::save_watch_entry(&crate::models::WatchEntry {
                     movie: selected_watch.movie.clone(),
                     episode: selected_watch.episode.clone(),
