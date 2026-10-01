@@ -604,7 +604,7 @@ fn execute_player(stream_url: &str, provider_type: usize, start_seconds: u64) ->
     let is_android = std::env::var("TERMUX_VERSION").is_ok();
 
     let menu_items = if is_android {
-        vec!["Putar di Pemutar Android (VLC/MX)", "Buka di Browser", "Kembali"]
+        vec!["Putar di MX Player (Anti-Blokir)", "Buka di Browser", "Kembali"]
     } else {
         vec!["Putar dengan MPV", "Putar dengan VLC", "Buka di Browser", "Kembali"]
     };
@@ -724,28 +724,41 @@ mp.register_event("shutdown", save)
         },
         1 => {
             if is_android {
-                println!("Membuka aplikasi video player bawaan Android...");
+                println!("Membuka video di MX Player...");
                 
-                // Simpan subtitle ke folder Download agar user bisa nge-load manual di VLC
+                // Simpan subtitle ke folder Download agar user bisa nge-load manual
                 let sub_path = "/sdcard/Download/animeku_idlix.vtt";
                 if std::path::Path::new(sub_path).exists() {
-                    println!("{} Subtitle telah disimpan di folder Download (animeku_idlix.vtt). Kamu bisa me-load nya secara manual di VLC.", "ℹ".yellow());
+                    println!("{} Subtitle disimpan di folder Download (animeku_idlix.vtt). Silahkan load manual di MX Player.", "ℹ".yellow());
                 }
 
-                // termux-open terbukti paling stabil di Termux. Kita berikan MIME type video
-                // agar Android menampilkan pilihan Video Player (VLC), bukan Chrome.
-                let status = Command::new("termux-open")
-                    .args(&["--content-type", "video/*", "--chooser", stream_url])
+                // Injeksi Header ke dalam URL khusus untuk MX Player (dipisah dengan '|')
+                let mx_url = if provider_type == PROVIDER_OTAKUDESU {
+                    format!("{}|User-Agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36&Referer=https://desustream.net/", stream_url)
+                } else {
+                    // IDLIX
+                    format!("{}|User-Agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", stream_url)
+                };
+
+                // Coba buka dengan MX Player versi gratis (com.mxtech.videoplayer.ad)
+                let status = Command::new("am")
+                    .args(&["start", "-a", "android.intent.action.VIEW", "-d", &mx_url, "-n", "com.mxtech.videoplayer.ad/.ActivityScreen"])
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status();
                 
                 if status.is_err() || !status.unwrap().success() {
-                    eprintln!("{} Gagal memanggil termux-open", "■".red());
-                    std::thread::sleep(std::time::Duration::from_secs(2));
-                } else {
-                    println!("Silahkan tonton di aplikasi pilihanmu!");
-                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    // Jika gagal, coba versi Pro (com.mxtech.videoplayer.pro)
+                    let status_pro = Command::new("am")
+                        .args(&["start", "-a", "android.intent.action.VIEW", "-d", &mx_url, "-n", "com.mxtech.videoplayer.pro/.ActivityScreen"])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                        
+                    if status_pro.is_err() || !status_pro.unwrap().success() {
+                        eprintln!("{} Gagal memanggil MX Player! Apakah aplikasinya sudah di-install?", "■".red());
+                        std::thread::sleep(std::time::Duration::from_secs(3));
+                    }
                 }
             } else {
                 println!("Sedang memutar video di VLC... (Tutup VLC untuk kembali ke menu)");
