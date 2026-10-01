@@ -604,7 +604,7 @@ fn execute_player(stream_url: &str, provider_type: usize, start_seconds: u64) ->
     let is_android = std::env::var("TERMUX_VERSION").is_ok();
 
     let menu_items = if is_android {
-        vec!["Putar dengan MPV (Termux-X11)", "Putar di Pemutar Android (VLC/MX)", "Buka di Browser", "Kembali"]
+        vec!["Putar di Pemutar Android (VLC/MX)", "Buka di Browser", "Kembali"]
     } else {
         vec!["Putar dengan MPV", "Putar dengan VLC", "Buka di Browser", "Kembali"]
     };
@@ -615,9 +615,19 @@ fn execute_player(stream_url: &str, provider_type: usize, start_seconds: u64) ->
         .items(&menu_items)
         .interact()?;
 
+    let choice_normalized = if is_android {
+        match player_choice {
+            0 => 1, // Map to VLC / Android Native
+            1 => 2, // Map to Browser
+            _ => 3, // Map to Kembali
+        }
+    } else {
+        player_choice
+    };
+
     let mut final_pos = start_seconds;
 
-    match player_choice {
+    match choice_normalized {
         0 => {
             println!("Sedang memutar video di MPV... (Tutup MPV untuk kembali ke menu)");
 
@@ -716,7 +726,8 @@ mp.register_event("shutdown", save)
             if is_android {
                 println!("Membuka aplikasi video player bawaan Android...");
                 let mut cmd = Command::new("am");
-                cmd.args(&["start", "--user", "0", "-a", "android.intent.action.VIEW", "-d", stream_url, "-t", "video/*"]);
+                // Hilangkan -t video/* agar sama persis sifatnya seperti Buka di Browser (termux-open)
+                cmd.args(&["start", "--user", "0", "-a", "android.intent.action.VIEW", "-d", stream_url]);
                 
                 // Tambahkan subtitle jika ada di folder Download
                 let sub_path = "/sdcard/Download/animeku_idlix.vtt";
