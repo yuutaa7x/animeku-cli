@@ -50,6 +50,35 @@ pub fn save_last_watch(last_watch: &LastWatch) {
     }
 }
 
+/// Tanya jenis konten → tentukan provider.
+/// Movie / Series → Idlix otomatis.
+/// Anime → pilih Idlix atau Otakudesu.
+pub fn pick_provider() -> anyhow::Result<usize> {
+    let content_type = dialoguer::Select::with_theme(&crate::util::custom_theme())
+        .with_prompt("Jenis konten")
+        .items(&[
+            "Movie",
+            "Series (Live Action / Drama)",
+            "Anime",
+        ])
+        .default(2)
+        .interact()?;
+
+    match content_type {
+        // Movie atau Series → Idlix saja
+        0 | 1 => Ok(0), // PROVIDER_IDLIX
+        // Anime → tawarkan Idlix atau Otakudesu
+        _ => {
+            let provider = dialoguer::Select::with_theme(&crate::util::custom_theme())
+                .with_prompt("Pilih Provider")
+                .items(&["Idlix (Anime & Movies)", "Otakudesu (Anime)"])
+                .default(0)
+                .interact()?;
+            Ok(provider)
+        }
+    }
+}
+
 /// Prompt untuk input judul baru (tanpa history dropdown).
 /// History disimpan di "Watch History" terpisah.
 pub fn get_user_input() -> anyhow::Result<Option<Input>> {
@@ -63,11 +92,7 @@ pub fn get_user_input() -> anyhow::Result<Option<Input>> {
 
     save_history(title.trim());
 
-    let tipe = dialoguer::FuzzySelect::with_theme(&crate::util::custom_theme())
-        .with_prompt("Pilih Provider")
-        .item("Idlix (Animation & Movies)").item("Otakudesu")
-        .default(0)
-        .interact()?;
+    let tipe = pick_provider()?;
 
     Ok(Some(Input { title: title.trim().to_string(), tipe }))
 }

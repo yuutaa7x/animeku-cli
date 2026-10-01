@@ -6,7 +6,7 @@ use colored::Colorize;
 use ext::Ext;
 use tokio::runtime;
 
-use crate::{input::{get_user_input, load_history, save_history}, util::clearscreen_and_show_banner};
+use crate::{input::{get_user_input, load_history, save_history, pick_provider}, util::clearscreen_and_show_banner};
 
 mod animeku;
 mod ext;
@@ -1050,12 +1050,8 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
             let history_index = choice - last_watch_offset - separator_offset;
             let selected_title = history[history_index].clone();
 
-            // Pilih provider
-            let tipe = dialoguer::FuzzySelect::with_theme(&crate::util::custom_theme())
-                .with_prompt(format!("Provider untuk \"{}\":", selected_title))
-                .item("Idlix (Animation & Movies)").item("Otakudesu")
-                .default(0)
-                .interact()?;
+            // Tanya jenis konten → tentukan provider
+            let tipe = pick_provider()?;
 
             save_history(&selected_title);
 
