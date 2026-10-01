@@ -1081,7 +1081,7 @@ async fn handle_watch_mode(discord: &mut Option<DiscordIpcClient>) -> anyhow::Re
         clearscreen_and_show_banner()?;
         let menu_items = [
             "1. Watch Any Anime / Movie",
-            "2. Watch Last Anime / Movie [Watch History]",
+            "2. Watch Last Anime / Movie [Watch & Search History]",
             "3. Kembali ke Menu Utama",
         ];
 
