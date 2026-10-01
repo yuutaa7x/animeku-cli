@@ -726,8 +726,8 @@ mp.register_event("shutdown", save)
             if is_android {
                 println!("Membuka aplikasi video player bawaan Android...");
                 let mut cmd = Command::new("am");
-                // Hilangkan -t video/* agar sama persis sifatnya seperti Buka di Browser (termux-open)
-                cmd.args(&["start", "--user", "0", "-a", "android.intent.action.VIEW", "-d", stream_url]);
+                // Menghilangkan --user 0 karena sering bikin force close/error di beberapa versi Android
+                cmd.args(&["start", "-a", "android.intent.action.VIEW", "-d", stream_url]);
                 
                 // Tambahkan subtitle jika ada di folder Download
                 let sub_path = "/sdcard/Download/animeku_idlix.vtt";
@@ -740,7 +740,20 @@ mp.register_event("shutdown", save)
                                 .status();
                 
                 if status.is_err() || !status.unwrap().success() {
-                    eprintln!("{} Gagal memanggil pemutar video Android", "■".red());
+                    // Fallback menggunakan termux-open (sama seperti Buka di Browser)
+                    let fallback = Command::new("termux-open")
+                        .arg(stream_url)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                        
+                    if fallback.is_err() || !fallback.unwrap().success() {
+                        eprintln!("{} Gagal memanggil pemutar video Android", "■".red());
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                    } else {
+                        println!("Berhasil menggunakan metode termux-open! (Catatan: Subtitle mungkin harus dipilih manual)");
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                    }
                 } else {
                     println!("Silahkan tonton di aplikasi pilihanmu!");
                     std::thread::sleep(std::time::Duration::from_secs(2));
