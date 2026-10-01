@@ -45,11 +45,30 @@ fn wrap_url(base_url: &str, target: &str, port: u16) -> String {
 
 fn rewrite_m3u8(text: &str, target_url: &str, port: u16) -> String {
     let mut rewritten = String::new();
+    let is_master = text.contains("#EXT-X-STREAM-INF");
+    let sub_uri = format!("http://127.0.0.1:{}/?sub=1", port);
+    let sub_media = format!("#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"Indonesia\",LANGUAGE=\"id\",DEFAULT=YES,AUTOSELECT=YES,URI=\"{}\"\n", sub_uri);
     
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() { continue; }
         
+        if trimmed == "#EXTM3U" && is_master {
+            rewritten.push_str(trimmed);
+            rewritten.push('\n');
+            rewritten.push_str(&sub_media);
+            continue;
+        }
+
+        if trimmed.starts_with("#EXT-X-STREAM-INF:") {
+            rewritten.push_str(trimmed);
+            if !trimmed.contains("SUBTITLES=") {
+                rewritten.push_str(",SUBTITLES=\"subs\"");
+            }
+            rewritten.push('\n');
+            continue;
+        }
+
         if trimmed.starts_with("#EXT-X-MAP:") || trimmed.starts_with("#EXT-X-MEDIA:") {
             if let Some(uri_pos) = trimmed.find("URI=\"") {
                 let after = &trimmed[uri_pos + 5..];
@@ -91,6 +110,38 @@ async fn handle_connection(socket: &mut TcpStream, port: u16, provider_id: usize
     }
 
     let path = parts[1];
+    
+    if path.starts_with("/?sub=1") {
+        let m3u8_content = format!(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:99999\n#EXT-X-VERSION:3\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:99999.000,\nhttp://127.0.0.1:{}/?vtt=1\n#EXT-X-ENDLIST\n",
+            port
+        );
+        let header = "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nConnection: close\r\n\r\n";
+        socket.write_all(header.as_bytes()).await?;
+        socket.write_all(m3u8_content.as_bytes()).await?;
+        return Ok(());
+    }
+
+    if path.starts_with("/?vtt=1") {
+        let sub_path = "/sdcard/Download/animeku_idlix.vtt";
+        if let Ok(sub_content) = tokio::fs::read_to_string(sub_path).await {
+            let header = "HTTP/1.1 200 OK\r\nContent-Type: text/vtt\r\nConnection: close\r\n\r\n";
+            socket.write_all(header.as_bytes()).await?;
+            socket.write_all(sub_content.as_bytes()).await?;
+        } else {
+            let sub_path2 = crate::util::temp_file("animeku_idlix.vtt");
+            if let Ok(sub_content) = tokio::fs::read_to_string(&sub_path2).await {
+                let header = "HTTP/1.1 200 OK\r\nContent-Type: text/vtt\r\nConnection: close\r\n\r\n";
+                socket.write_all(header.as_bytes()).await?;
+                socket.write_all(sub_content.as_bytes()).await?;
+            } else {
+                let header = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
+                socket.write_all(header.as_bytes()).await?;
+            }
+        }
+        return Ok(());
+    }
+
     if !path.starts_with("/?url=") {
         return Ok(());
     }
