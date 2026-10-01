@@ -641,6 +641,15 @@ mp.register_event("shutdown", save)
             let mut cmd = Command::new(&mpv_bin);
 
             if std::env::var("TERMUX_VERSION").is_ok() {
+                // Cek apakah termux-x11 sudah berjalan
+                if let Ok(out) = Command::new("pgrep").arg("termux-x11").output() {
+                    if out.stdout.is_empty() {
+                        println!("  {} Menjalankan Termux-X11 server otomatis...", "ℹ".yellow());
+                        let _ = Command::new("termux-x11").arg(":0").spawn();
+                        std::thread::sleep(std::time::Duration::from_millis(1500));
+                    }
+                }
+
                 cmd.env("DISPLAY", ":0");
                 cmd.arg("--vo=gpu");
                 cmd.arg("--gpu-context=x11");
