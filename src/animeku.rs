@@ -24,6 +24,10 @@ impl AnimekuCli {
         self.episode_cache.get(id).map(|(_, m)| m.clone())
     }
 
+    pub fn get_episode_list(&self, id: &str) -> Option<Vec<Episode>> {
+        self.episode_cache.get(id).map(|(e, _)| e.clone())
+    }
+
     pub fn new(extractor: Box<dyn Ext>) -> Self {
         Self {
             movie_cache: HashMap::new(),

@@ -36,18 +36,24 @@ impl std::fmt::Display for Episode {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct LastWatch {
+pub struct WatchEntry {
     pub movie: Movie,
     pub episode: Episode,
     pub provider_type: usize,
     pub position_seconds: u64,
+    /// Unix timestamp (seconds) of when this entry was last updated.
+    pub updated_at: u64,
 }
 
-impl LastWatch {
+impl WatchEntry {
     pub fn format_duration(&self) -> String {
         format_seconds(self.position_seconds)
     }
 }
+
+/// Backward-compatibility alias.
+
+/// Ordered watch history (most recent first), capped at 30 entries.
 
 pub fn format_seconds(seconds: u64) -> String {
     let hours = seconds / 3600;
@@ -107,6 +113,7 @@ mod tests {
             },
             provider_type: 1,
             position_seconds: 754,
+            updated_at: 0,
         };
         assert_eq!(lw.format_duration(), "12:34");
 

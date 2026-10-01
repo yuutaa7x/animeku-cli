@@ -6,7 +6,7 @@ use colored::Colorize;
 use ext::Ext;
 use tokio::runtime;
 
-use crate::{input::{get_user_input, load_history, save_history, pick_provider}, util::clearscreen_and_show_banner};
+use crate::{input::{get_user_input, load_history, save_history, pick_provider, load_watch_history, delete_watch_entry, delete_search_history_entry}, util::clearscreen_and_show_banner};
 
 mod animeku;
 mod ext;
@@ -720,6 +720,28 @@ mp.register_event("shutdown", save)
     Ok(final_pos)
 }
 
+fn extract_ep_num(title: &str) -> u32 {
+    // Extract the last continuous sequence of digits from the title as the episode number
+    // "Episode 10" -> 10, "S1E02" -> 2
+    let mut num_str = String::new();
+    let mut in_num = false;
+    let mut last_num = 0;
+    for c in title.chars() {
+        if c.is_ascii_digit() {
+            num_str.push(c);
+            in_num = true;
+        } else if in_num {
+            last_num = num_str.parse().unwrap_or(0);
+            num_str.clear();
+            in_num = false;
+        }
+    }
+    if in_num {
+        last_num = num_str.parse().unwrap_or(0);
+    }
+    last_num
+}
+
 async fn handle_movie_episodes(
     animeku: &mut AnimekuCli,
     movie: &crate::models::Movie,
@@ -730,55 +752,82 @@ async fn handle_movie_episodes(
 
     loop {
         clearscreen_and_show_banner()?;
-        let episode = match animeku.extract_episode(movie.clone()).await? {
+        let mut episode = match animeku.extract_episode(movie.clone()).await? {
             Some(ep) => ep,
             None => break, // Back to movie search
         };
 
-        let season_num = match cached_season {
-            Some(s) => s,
-            None => {
-                let detected = if episode.is_series {
-                    let meta_opt = animeku.get_meta(&movie.id);
-                    let thumb = meta_opt.clone().and_then(|m| m.thumb_url).unwrap_or_default();
-                    let meta_data = meta_opt.map(|m| m.data).unwrap_or_default();
-                    if let Some(s) = detect_season(&movie.title, &thumb, &meta_data) {
-                        s
+        loop {
+            let season_num = match cached_season {
+                Some(s) => s,
+                None => {
+                    let detected = if episode.is_series {
+                        let meta_opt = animeku.get_meta(&movie.id);
+                        let thumb = meta_opt.clone().and_then(|m| m.thumb_url).unwrap_or_default();
+                        let meta_data = meta_opt.map(|m| m.data).unwrap_or_default();
+                        if let Some(s) = detect_season(&movie.title, &thumb, &meta_data) {
+                            s
+                        } else {
+                            let answer: String = dialoguer::Input::with_theme(&crate::util::custom_theme())
+                                .with_prompt("Sistem gagal mendeteksi Season. Ini Season berapa? (Kosongkan jika S1)")
+                                .allow_empty(true)
+                                .interact_text()
+                                .unwrap_or_default();
+                            answer.trim().parse::<u32>().unwrap_or(1)
+                        }
                     } else {
-                        let answer: String = dialoguer::Input::with_theme(&crate::util::custom_theme())
-                            .with_prompt("Sistem gagal mendeteksi Season. Ini Season berapa? (Kosongkan jika S1)")
-                            .allow_empty(true)
-                            .interact_text()
-                            .unwrap_or_default();
-                        answer.trim().parse::<u32>().unwrap_or(1)
-                    }
-                } else {
-                    1
-                };
-                cached_season = Some(detected);
-                detected
+                        1
+                    };
+                    cached_season = Some(detected);
+                    detected
+                }
+            };
+
+            // Stream selection & playback
+            clearscreen_and_show_banner()?;
+            let meta_opt = animeku.get_meta(&movie.id);
+            let thumb_url = meta_opt.and_then(|m| m.thumb_url);
+            
+            update_discord_status(discord, &movie.title, &episode.title, episode.is_series, season_num, thumb_url);
+
+            let stream_opt = animeku.extract_stream_urls(episode.clone()).await?;
+            if let Some(stream) = stream_opt {
+                let last_pos = execute_player(&stream.url, provider_type, 0)?;
+                input::save_watch_entry(&crate::models::WatchEntry {
+                    movie: movie.clone(),
+                    episode: episode.clone(),
+                    provider_type,
+                    position_seconds: last_pos,
+                    updated_at: 0,
+                });
             }
-        };
+            
+            reset_discord_status(discord);
 
-        // Stream selection & playback
-        clearscreen_and_show_banner()?;
-        let meta_opt = animeku.get_meta(&movie.id);
-        let thumb_url = meta_opt.and_then(|m| m.thumb_url);
-        
-        update_discord_status(discord, &movie.title, &episode.title, episode.is_series, season_num, thumb_url);
+            // Auto-next logic
+            let mut next_ep_opt = None;
+            if let Some(episodes) = animeku.get_episode_list(&movie.id) {
+                let current_num = extract_ep_num(&episode.title);
+                if current_num > 0 {
+                    next_ep_opt = episodes.iter().find(|e| extract_ep_num(&e.title) == current_num + 1).cloned();
+                }
+            }
 
-        let stream_opt = animeku.extract_stream_urls(episode.clone()).await?;
-        if let Some(stream) = stream_opt {
-            let last_pos = execute_player(&stream.url, provider_type, 0)?;
-            input::save_last_watch(&crate::models::LastWatch {
-                movie: movie.clone(),
-                episode: episode.clone(),
-                provider_type,
-                position_seconds: last_pos,
-            });
+            if let Some(next_ep) = next_ep_opt {
+                let confirm = dialoguer::Confirm::with_theme(&crate::util::custom_theme())
+                    .with_prompt(format!("Lanjut ke {}?", next_ep.title.trim()))
+                    .default(true)
+                    .interact()?;
+                
+                if confirm {
+                    episode = next_ep;
+                    continue; // Loop play again with next episode
+                }
+            }
+            
+            // If no next episode, or user declined, break back to episode selection
+            break;
         }
-        
-        reset_discord_status(discord);
     }
     Ok(())
 }
@@ -924,13 +973,13 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
     loop {
         clearscreen_and_show_banner()?;
 
-        let last_watch_opt = input::load_last_watch();
-        let history = load_history();
+        let watch_history = load_watch_history();
+        let search_history = load_history();
 
-        // Build menu: last watch resume (if any) + all history titles + back
         let mut menu_items: Vec<String> = Vec::new();
 
-        if let Some(ref lw) = last_watch_opt {
+        // 1. Add Watch History entries
+        for lw in &watch_history {
             let provider_name = if lw.provider_type == PROVIDER_OTAKUDESU { "Otakudesu" } else { "Idlix" };
             menu_items.push(format!(
                 "[ Lanjutkan: {} - {} | {} | {} ]",
@@ -941,16 +990,16 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
             ));
         }
 
-        if history.is_empty() && last_watch_opt.is_none() {
-            println!("Belum ada riwayat tontonan.\n");
+        if watch_history.is_empty() && search_history.is_empty() {
+            println!("Belum ada riwayat tontonan/pencarian.\n");
             println!("Tekan Enter untuk kembali...");
             let mut dummy = String::new();
             let _ = std::io::stdin().read_line(&mut dummy);
             return Ok(());
         }
 
-        // Separator + Search History section (only show if there's history)
-        let separator_index: Option<usize> = if !history.is_empty() {
+        // 2. Separator + Search History
+        let separator_index: Option<usize> = if !search_history.is_empty() {
             let idx = menu_items.len();
             menu_items.push("─── Search History ───────────────────────────".to_string());
             Some(idx)
@@ -958,48 +1007,45 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
             None
         };
 
-        for title in &history {
+        for title in &search_history {
             menu_items.push(format!("  {}", title));
         }
         menu_items.push("  Kembali".to_string());
 
         let choice = dialoguer::Select::with_theme(&crate::util::custom_theme())
-            .with_prompt("Watch History:")
+            .with_prompt("Watch & Search History:")
             .default(0)
             .items(&menu_items)
             .interact()?;
 
-        // Klik separator = no-op, loop lagi
         if Some(choice) == separator_index {
             continue;
         }
 
-        let last_watch_offset = if last_watch_opt.is_some() { 1 } else { 0 };
-        // separator takes 1 slot if shown
-        let separator_offset = if separator_index.is_some() { 1 } else { 0 };
         let back_index = menu_items.len() - 1;
-
         if choice == back_index {
             break;
         }
 
+        let watch_count = watch_history.len();
 
-        // Pilih lanjutkan last watch
-        if last_watch_opt.is_some() && choice == 0 {
-            let last_watch = last_watch_opt.unwrap();
+        if choice < watch_count {
+            // Picked from Watch History
+            let selected_watch = watch_history[choice].clone();
+            
             clearscreen_and_show_banner()?;
-
-            println!("Riwayat Tontonan Terakhir:");
-            println!("  Judul    : {}", last_watch.movie.title.trim());
-            println!("  Episode  : {}", last_watch.episode.title.trim());
-            println!("  Posisi   : {}", last_watch.format_duration());
-            let provider_name = if last_watch.provider_type == PROVIDER_OTAKUDESU { "Otakudesu" } else { "Idlix" };
+            println!("Riwayat Tontonan:");
+            println!("  Judul    : {}", selected_watch.movie.title.trim());
+            println!("  Episode  : {}", selected_watch.episode.title.trim());
+            println!("  Posisi   : {}", selected_watch.format_duration());
+            let provider_name = if selected_watch.provider_type == PROVIDER_OTAKUDESU { "Otakudesu" } else { "Idlix" };
             println!("  Provider : {}\n", provider_name);
 
             let actions = [
-                format!("1. Lanjutkan Menonton (mulai {})", last_watch.format_duration()),
+                format!("1. Lanjutkan Menonton (mulai {})", selected_watch.format_duration()),
                 "2. Putar Ulang dari Awal (00:00)".to_string(),
-                "3. Kembali".to_string(),
+                "3. Hapus dari Histori".to_string(),
+                "4. Kembali".to_string(),
             ];
 
             let action_choice = dialoguer::Select::with_theme(&crate::util::custom_theme())
@@ -1008,51 +1054,75 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
                 .items(&actions)
                 .interact()?;
 
-            let start_seconds = match action_choice {
-                0 => last_watch.position_seconds,
-                1 => 0,
-                _ => continue,
-            };
+            if action_choice == 2 {
+                delete_watch_entry(choice);
+                continue;
+            } else if action_choice == 3 {
+                continue;
+            }
+
+            let start_seconds = if action_choice == 0 { selected_watch.position_seconds } else { 0 };
 
             clearscreen_and_show_banner()?;
 
-            let season_num = if last_watch.episode.is_series {
-                detect_season(&last_watch.movie.title, "", &[]).unwrap_or(1)
+            let season_num = if selected_watch.episode.is_series {
+                detect_season(&selected_watch.movie.title, "", &[]).unwrap_or(1)
             } else {
                 1
             };
 
             update_discord_status(
                 discord,
-                &last_watch.movie.title,
-                &last_watch.episode.title,
-                last_watch.episode.is_series,
+                &selected_watch.movie.title,
+                &selected_watch.episode.title,
+                selected_watch.episode.is_series,
                 season_num,
                 None,
             );
 
-            let mut animeku = AnimekuCli::new(get_ext_by_provider(last_watch.provider_type));
-            let stream_opt = animeku.extract_stream_urls(last_watch.episode.clone()).await?;
+            let mut animeku = AnimekuCli::new(get_ext_by_provider(selected_watch.provider_type));
+            let stream_opt = animeku.extract_stream_urls(selected_watch.episode.clone()).await?;
             if let Some(stream) = stream_opt {
-                let final_pos = execute_player(&stream.url, last_watch.provider_type, start_seconds)?;
-                input::save_last_watch(&crate::models::LastWatch {
-                    movie: last_watch.movie.clone(),
-                    episode: last_watch.episode.clone(),
-                    provider_type: last_watch.provider_type,
+                let final_pos = execute_player(&stream.url, selected_watch.provider_type, start_seconds)?;
+                input::save_watch_entry(&crate::models::WatchEntry {
+                    movie: selected_watch.movie.clone(),
+                    episode: selected_watch.episode.clone(),
+                    provider_type: selected_watch.provider_type,
                     position_seconds: final_pos,
+                    updated_at: 0,
                 });
             }
-
             reset_discord_status(discord);
 
         } else {
-            // Pilih dari history — langsung search judul tersebut
-            let history_index = choice - last_watch_offset - separator_offset;
-            let selected_title = history[history_index].clone();
+            // Picked from Search History
+            let separator_offset = if separator_index.is_some() { 1 } else { 0 };
+            let history_index = choice - watch_count - separator_offset;
+            let selected_title = search_history[history_index].clone();
 
-            // Tanya jenis konten → tentukan provider
+            let actions = [
+                "1. Cari Judul Ini".to_string(),
+                "2. Hapus dari Histori".to_string(),
+                "3. Kembali".to_string(),
+            ];
+
+            clearscreen_and_show_banner()?;
+            println!("Judul Pencarian: {}\n", selected_title);
+
+            let action_choice = dialoguer::Select::with_theme(&crate::util::custom_theme())
+                .with_prompt("Pilih Aksi:")
+                .default(0)
+                .items(&actions)
+                .interact()?;
+
+            if action_choice == 1 {
+                delete_search_history_entry(&selected_title);
+                continue;
+            } else if action_choice == 2 {
+                continue;
+            }
+
             let tipe = pick_provider()?;
-
             save_history(&selected_title);
 
             let input_data = crate::models::Input { title: selected_title, tipe };

@@ -31,7 +31,15 @@ Buka **PowerShell** atau **CMD** lalu jalankan perintah berikut:
 powershell -c "irm https://raw.githubusercontent.com/yuutaa7x/animeku-cli/refs/heads/main/install.bat -OutFile install.bat; .\install.bat"
 ```
 
-Script akan otomatis menginstall Rust, GCC (via MSYS2), dan MPV jika belum ada, lalu build dan install animeku-cli.
+#### Auto Install (Linux / macOS — satu baris)
+
+Buka terminal lalu jalankan:
+
+```bash
+curl -sL https://raw.githubusercontent.com/yuutaa7x/animeku-cli/refs/heads/main/install.sh | bash
+```
+
+Script akan otomatis menginstall Rust dan MPV jika belum ada, lalu build dan install animeku-cli.
 
 #### Manual Install (semua platform)
 
@@ -52,6 +60,12 @@ Buka **PowerShell** atau **CMD** lalu jalankan perintah berikut:
 powershell -c "irm https://raw.githubusercontent.com/yuutaa7x/animeku-cli/refs/heads/main/uninstall.bat -OutFile uninstall.bat; .\uninstall.bat"
 ```
 
+#### Auto Uninstall (Linux / macOS — satu baris)
+
+```bash
+curl -sL https://raw.githubusercontent.com/yuutaa7x/animeku-cli/refs/heads/main/uninstall.sh | bash
+```
+
 #### Manual Uninstall (semua platform)
 
 ```bash
@@ -65,18 +79,26 @@ cargo uninstall animeku-cli
 - Hasil pencarian lengkap dengan pilihan server & resolusi (1080p, 720p, 480p, 360p).
 - Otomatis memuat Subtitle Indonesia langsung ke player.
 - Terintegrasi dengan Discord Rich Presence (RPC).
-- Fitur Riwayat Tontonan & Resume Otomatis (melanjutkan episode dan menit/detik terakhir yang ditonton).
+- Fitur Riwayat Tontonan multi-entry (menyimpan histori judul & episode yang ditonton).
+- Fitur Riwayat Pencarian (suggestion otomatis saat mengetik).
+- Resume Otomatis (melanjutkan episode dari menit/detik terakhir yang ditonton).
+- Auto-Next Episode setelah selesai memutar.
+- Pengecekan dependensi dan Check Health sistem yang interaktif.
 
 ### Changelog (Perbedaan dari Upstream)
-Dibandingkan dengan repo upstream (`lucasbuilds/animeku-cli`), fork ini membawa sejumlah perbaikan besar:
+Dibandingkan dengan repo upstream (`lucasbuilds/animeku-cli`), fork ini membawa sejumlah perbaikan besar (saat ini v0.2.0):
 
-#### 1. Menu & Riwayat Tontonan (Resume Playback)
+#### 1. Menu & Riwayat Tontonan / Pencarian
 - **Menu Utama & Submenu Terstruktur**:
-  - Menu utama: `1. Update Animeku-CLI`, `2. Go Watch Anime / Movie`, dan `3. Exit`.
-  - Submenu menonton: `1. Watch Any Anime / Movie` (pencarian biasa) dan `2. Watch Last Anime / Movie` (riwayat tontonan).
-- **Auto-Tracking & Resume Playback**:
-  - Otomatis melacak dan menyimpan posisi timestamp tontonan secara presisi melalui integrasi script MPV.
-  - Memilih `Watch Last Anime / Movie` menampilkan judul, episode, dan posisi menit terakhir yang ditonton, serta opsi untuk langsung melanjutkan pemutaran (*resume*) atau memutar ulang dari awal.
+  - Ditambahkan fitur interaktif `Check Health` pada menu utama untuk memantau status aplikasi.
+  - Submenu dipisah menjadi `Watch Any Anime / Movie` (pencarian baru) dan `Watch & Search History` (gabungan riwayat).
+- **Auto-Tracking & Resume Playback Multi-Entry**:
+  - Menyimpan *banyak histori tontonan sekaligus* (multi-entry), bisa resume per-judul kapan pun secara presisi.
+  - Opsi auto-next episode memudahkan lanjut marathon ke episode selanjutnya tanpa bolak-balik menu.
+  - Pilihan untuk menghapus riwayat secara fleksibel.
+- **Search History Terintegrasi**:
+  - Suggestion interaktif saat mengetik judul pada menu pencarian.
+  - Pencarian konten membedakan provider secara otomatis (Movie & Series -> otomatis Idlix; Anime -> pilih Idlix/Otakudesu).
 
 #### 2. Provider Streaming
 - **Idlix (Baru & Dioptimasi)**:
@@ -109,7 +131,8 @@ Dibandingkan dengan repo upstream (`lucasbuilds/animeku-cli`), fork ini membawa 
 
 #### 5. Kompatibilitas Windows & Cross-Platform
 - **Auto-Install & Deteksi Package Manager**:
-  - Memperbaiki deteksi package manager Windows (`winget`, `choco`, `scoop`) yang sebelumnya gagal karena `which` tidak tersedia di Windows.
+  - Script install satu baris tersedia untuk Windows (`.bat`) maupun Linux/macOS (`.sh`).
+  - Memperbaiki deteksi package manager Windows (`winget`, `choco`, `scoop`) yang sebelumnya gagal.
   - Mendukung auto-install MPV resmi di Windows melalui winget (`shinchiro.mpv` dengan fallback `mpv.net`).
   - Pencarian jalur binary cerdas (mendeteksi MPV/VLC di `Program Files`, `WindowsApps`, `scoop`, `chocolatey`).
 - **Penyimpanan Temp File Cross-Platform**:
