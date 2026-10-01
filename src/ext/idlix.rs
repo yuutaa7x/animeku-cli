@@ -406,7 +406,18 @@ impl Ext for Idlix {
             }
         }
 
-        // 2. Parse video variants
+        // Untuk Android (VLC), file lokal M3U8 tidak bisa dibaca karena masalah permission Termux,
+        // dan tidak akan ada suaranya karena VLC Android tidak support eksternal audio track.
+        // Jadi kita HANYA mengembalikan Master URL (yang punya audio + semua resolusi).
+        let is_android = std::env::var("TERMUX_VERSION").is_ok();
+        if is_android {
+            return Ok(vec![Stream {
+                url: master_url.to_string(),
+                title: "Idlix [Semua Resolusi] (Pilih kualitas di dalam VLC)".to_string(),
+            }]);
+        }
+
+        // 2. Parse video variants (Hanya untuk PC / MPV)
         let mut variants = Vec::new();
         let mut pending_inf: Option<(String, u32, u64)> = None;
 
@@ -476,11 +487,6 @@ impl Ext for Idlix {
                 title,
             });
         }
-
-        streams.push(Stream {
-            url: master_url.to_string(),
-            title: "Idlix [Auto / Android Native]".to_string(),
-        });
 
         println!(" {}", "✓ Berhasil!".green());
         Ok(streams)
