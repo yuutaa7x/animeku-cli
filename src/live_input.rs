@@ -35,15 +35,19 @@ async fn fetch_suggestions(query: String, tx: mpsc::Sender<FetchResult>) {
         }
     };
 
-    let url = format!("https://api.jikan.moe/v4/anime?q={}&limit=5", urlencoding::encode(&query));
-    match client.get(&url).send().await {
+    let query_payload = serde_json::json!({
+        "query": "query ($search: String) { Page(page: 1, perPage: 5) { media(search: $search, type: ANIME, sort: POPULARITY_DESC) { title { romaji } } } }",
+        "variables": { "search": &query }
+    });
+
+    match client.post("https://graphql.anilist.co").json(&query_payload).send().await {
         Ok(res) => {
             if res.status().is_success() {
                 if let Ok(json) = res.json::<serde_json::Value>().await {
                     let mut titles = vec![];
-                    if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
-                        for item in data {
-                            if let Some(title) = item.get("title").and_then(|t| t.as_str()) {
+                    if let Some(media) = json.pointer("/data/Page/media").and_then(|m| m.as_array()) {
+                        for item in media {
+                            if let Some(title) = item.pointer("/title/romaji").and_then(|t| t.as_str()) {
                                 titles.push(title.to_string());
                             }
                         }
