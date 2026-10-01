@@ -21,7 +21,7 @@ echo "[3/4] Menginstall Dependensi (Rust, MPV, Termux-X11, PulseAudio)..."
 pkg install rust binutils mpv termux-x11-nightly pulseaudio -y
 
 echo "[4/4] Build & Install Animeku-CLI..."
-cargo install --path .
+cargo install --git https://github.com/yuutaa7x/animeku-cli
 
 echo ""
 echo "================================================="
