@@ -111,6 +111,15 @@ async fn handle_connection(socket: &mut TcpStream, port: u16, provider_id: usize
 
     let path = parts[1];
     
+    // Extract Range header if present
+    let mut range_header = None;
+    for line in lines {
+        if line.to_lowercase().starts_with("range:") {
+            range_header = Some(line["range:".len()..].trim().to_string());
+            break;
+        }
+    }
+    
     if path.starts_with("/?sub=1") {
         let sub_path = "/sdcard/Download/animeku_idlix.vtt";
         let sub_path2 = crate::util::temp_file("animeku_idlix.vtt");
@@ -188,6 +197,10 @@ async fn handle_connection(socket: &mut TcpStream, port: u16, provider_id: usize
         cmd.args(&["-b", &cookie_path]);
     }
     
+    if let Some(r) = &range_header {
+        cmd.args(&["-H", &format!("Range: {}", r)]);
+    }
+
     cmd.arg(&target_url);
     cmd.stdout(std::process::Stdio::piped());
 
@@ -218,7 +231,20 @@ async fn handle_connection(socket: &mut TcpStream, port: u16, provider_id: usize
         let _ = f.write_all(log_msg.as_bytes()).await;
     }
 
-    let header = format!("HTTP/1.1 200 OK\r\nContent-Type: {}\r\nConnection: close\r\n\r\n", content_type);
+    let mut header = format!("HTTP/1.1 200 OK\r\nContent-Type: {}\r\nConnection: close\r\n\r\n", content_type);
+    
+    // Support 206 Partial Content for video segments if Range was requested
+    if !is_m3u8 && range_header.is_some() && !body_bytes.is_empty() {
+        if let Some(r) = &range_header {
+            if let Some(range_val) = r.to_lowercase().strip_prefix("bytes=") {
+                let parts: Vec<&str> = range_val.split('-').collect();
+                let start = parts.first().unwrap_or(&"").parse::<u64>().unwrap_or(0);
+                let end = start + body_bytes.len() as u64 - 1;
+                header = format!("HTTP/1.1 206 Partial Content\r\nContent-Type: {}\r\nContent-Range: bytes {}-{}/*\r\nConnection: close\r\n\r\n", content_type, start, end);
+            }
+        }
+    }
+
     socket.write_all(header.as_bytes()).await?;
 
     if is_m3u8 {
