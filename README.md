@@ -43,13 +43,13 @@ Script akan otomatis menginstall Rust dan MPV jika belum ada, lalu build dan ins
 
 #### Auto Install (Android / Termux — satu baris)
 
-Buka aplikasi Termux lalu jalankan:
+Buka aplikasi Termux lalu jalankan script dibawah ini untuk auto-install:
 
 ```bash
 curl -sL https://raw.githubusercontent.com/yuutaa7x/animeku-cli/refs/heads/main/install_termux.sh | bash
 ```
 
-Script akan mengonfigurasi `termux-x11`, `mpv`, dan build animeku-cli agar video bisa diputar tanpa Desktop Environment.
+Tunggu instalasi selesai, dan jangan lupa download VLC for Android di Play Store terlebih dahulu sebelum menginstall/sebelum nonton
 
 #### Manual Install (semua platform)
 
