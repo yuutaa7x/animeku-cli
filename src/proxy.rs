@@ -190,7 +190,9 @@ async fn handle_connection(socket: &mut TcpStream, port: u16, provider_id: usize
         is_m3u8, 
         String::from_utf8_lossy(&body_bytes.iter().copied().take(100).collect::<Vec<_>>())
     );
-    let _ = tokio::fs::OpenOptions::new().create(true).append(true).open("/sdcard/Download/proxy_debug.txt").await.map(|mut f| async move { f.write_all(log_msg.as_bytes()).await });
+    if let Ok(mut f) = tokio::fs::OpenOptions::new().create(true).append(true).open("/sdcard/Download/proxy_debug.txt").await {
+        let _ = f.write_all(log_msg.as_bytes()).await;
+    }
 
     let header = format!("HTTP/1.1 200 OK\r\nContent-Type: {}\r\nConnection: close\r\n\r\n", content_type);
     socket.write_all(header.as_bytes()).await?;
