@@ -949,6 +949,15 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
             return Ok(());
         }
 
+        // Separator + Search History section (only show if there's history)
+        let separator_index: Option<usize> = if !history.is_empty() {
+            let idx = menu_items.len();
+            menu_items.push("─── Search History ───────────────────────────".to_string());
+            Some(idx)
+        } else {
+            None
+        };
+
         for title in &history {
             menu_items.push(format!("  {}", title));
         }
@@ -960,12 +969,20 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
             .items(&menu_items)
             .interact()?;
 
+        // Klik separator = no-op, loop lagi
+        if Some(choice) == separator_index {
+            continue;
+        }
+
         let last_watch_offset = if last_watch_opt.is_some() { 1 } else { 0 };
+        // separator takes 1 slot if shown
+        let separator_offset = if separator_index.is_some() { 1 } else { 0 };
         let back_index = menu_items.len() - 1;
 
         if choice == back_index {
             break;
         }
+
 
         // Pilih lanjutkan last watch
         if last_watch_opt.is_some() && choice == 0 {
@@ -1030,7 +1047,7 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
 
         } else {
             // Pilih dari history — langsung search judul tersebut
-            let history_index = choice - last_watch_offset;
+            let history_index = choice - last_watch_offset - separator_offset;
             let selected_title = history[history_index].clone();
 
             // Pilih provider
