@@ -201,6 +201,12 @@ pub async fn get_live_input(prompt: &str) -> anyhow::Result<Option<(String, bool
             event = reader.next() => {
                 match event {
                     Some(Ok(Event::Key(key_event))) => {
+                        // FIX WINDOWS DOUBLE TYPING BUG:
+                        // Ignore key release events, only process press or repeat events
+                        if key_event.kind == crossterm::event::KeyEventKind::Release {
+                            continue;
+                        }
+
                         match key_event.code {
                             KeyCode::Esc => {
                                 final_result = None;
