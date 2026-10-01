@@ -19,7 +19,7 @@ pub async fn start_proxy(provider_id: usize) -> anyhow::Result<u16> {
 }
 
 fn wrap_url(base_url: &str, target: &str, port: u16) -> String {
-    let absolute_url = if target.starts_with("http") {
+    let mut absolute_url = if target.starts_with("http") {
         target.to_string()
     } else {
         match reqwest::Url::parse(base_url) {
@@ -27,6 +27,18 @@ fn wrap_url(base_url: &str, target: &str, port: u16) -> String {
             Err(_) => target.to_string(),
         }
     };
+
+    if let Ok(base_parsed) = reqwest::Url::parse(base_url) {
+        if let Some(query) = base_parsed.query() {
+            if let Ok(mut abs_parsed) = reqwest::Url::parse(&absolute_url) {
+                if abs_parsed.query().is_none() {
+                    abs_parsed.set_query(Some(query));
+                    absolute_url = abs_parsed.to_string();
+                }
+            }
+        }
+    }
+
     let encoded = urlencoding::encode(&absolute_url);
     format!("http://127.0.0.1:{}/?url={}", port, encoded)
 }
@@ -86,15 +98,6 @@ async fn handle_connection(socket: &mut TcpStream, port: u16, provider_id: usize
     let encoded_url = &path[6..];
     let target_url = urlencoding::decode(encoded_url)?.into_owned();
 
-    let is_m3u8 = target_url.contains(".m3u8");
-    let content_type = if is_m3u8 {
-        "application/vnd.apple.mpegurl"
-    } else if target_url.contains(".ts") {
-        "video/MP2T"
-    } else {
-        "application/octet-stream"
-    };
-
     let mut cmd = tokio::process::Command::new("curl");
     cmd.args(&[
         "-s",
@@ -119,19 +122,27 @@ async fn handle_connection(socket: &mut TcpStream, port: u16, provider_id: usize
     };
 
     let mut stdout = child.stdout.take().unwrap();
+    let mut body_bytes = Vec::new();
+    let _ = tokio::io::AsyncReadExt::read_to_end(&mut stdout, &mut body_bytes).await;
+    let _ = child.wait().await;
+
+    let is_m3u8 = body_bytes.starts_with(b"#EXTM3U");
+    let content_type = if is_m3u8 {
+        "application/vnd.apple.mpegurl"
+    } else {
+        "video/MP2T"
+    };
 
     let header = format!("HTTP/1.1 200 OK\r\nContent-Type: {}\r\nConnection: close\r\n\r\n", content_type);
     socket.write_all(header.as_bytes()).await?;
 
     if is_m3u8 {
-        let mut text = String::new();
-        let _ = tokio::io::AsyncReadExt::read_to_string(&mut stdout, &mut text).await;
+        let text = String::from_utf8_lossy(&body_bytes);
         let rewritten = rewrite_m3u8(&text, &target_url, port);
         socket.write_all(rewritten.as_bytes()).await?;
     } else {
-        let _ = tokio::io::copy(&mut stdout, socket).await;
+        socket.write_all(&body_bytes).await?;
     }
-    let _ = child.wait().await;
 
     Ok(())
 }
