@@ -654,12 +654,12 @@ mp.register_event("shutdown", save)
                     if out.stdout.is_empty() {
                         println!("  {} Menjalankan Termux-X11 server otomatis...", "ℹ".yellow());
                         let _ = Command::new("termux-x11").arg(":0").spawn();
-                        std::thread::sleep(std::time::Duration::from_millis(1500));
+                        std::thread::sleep(std::time::Duration::from_millis(2000));
                     }
                 }
 
                 cmd.env("DISPLAY", ":0");
-                // Biarkan mpv menentukan video output (vo) yang cocok di Termux
+                cmd.arg("--vo=x11"); // Pastikan pakai x11 untuk mencegah error gpu-context
             }
 
             cmd.arg("--hwdec=auto-safe");
@@ -715,8 +715,9 @@ mp.register_event("shutdown", save)
         1 => {
             if is_android {
                 println!("Membuka aplikasi video player bawaan Android...");
-                let status = Command::new("am")
-                    .args(&["start", "--user", "0", "-a", "android.intent.action.VIEW", "-d", stream_url, "-t", "video/*"])
+                // Gunakan termux-open agar file lokal di-convert ke content:// URI
+                let status = Command::new("termux-open")
+                    .arg(stream_url)
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status();

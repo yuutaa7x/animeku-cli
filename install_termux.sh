@@ -23,6 +23,13 @@ pkg install rust binutils mpv termux-x11-nightly pulseaudio -y
 echo "[4/4] Build & Install Animeku-CLI..."
 cargo install --git https://github.com/yuutaa7x/animeku-cli
 
+echo "Mengatur PATH agar animeku-cli bisa langsung dijalankan..."
+if [[ ":$PATH:" != *":$HOME/.cargo/bin:"* ]]; then
+    echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
+    echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zshrc
+    export PATH="$HOME/.cargo/bin:$PATH"
+fi
+
 echo ""
 echo "================================================="
 echo "             INSTALASI SELESAI                   "
