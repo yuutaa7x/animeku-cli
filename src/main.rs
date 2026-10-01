@@ -601,10 +601,18 @@ fn execute_player(stream_url: &str, provider_type: usize, start_seconds: u64) ->
     print!("{} Membuka tautan diaplikasi eksternal .. \n", "◆".blue());
     stdout().flush()?;
 
+    let is_android = std::env::var("TERMUX_VERSION").is_ok();
+
+    let menu_items = if is_android {
+        vec!["Putar dengan MPV (Termux-X11)", "Putar di Pemutar Android (VLC/MX)", "Buka di Browser", "Kembali"]
+    } else {
+        vec!["Putar dengan MPV", "Putar dengan VLC", "Buka di Browser", "Kembali"]
+    };
+
     let player_choice = dialoguer::Select::with_theme(&crate::util::custom_theme())
         .with_prompt("Pilih Aksi:")
         .default(0)
-        .items(&["Putar dengan MPV", "Putar dengan VLC", "Buka di Browser", "Kembali"])
+        .items(&menu_items)
         .interact()?;
 
     let mut final_pos = start_seconds;
@@ -651,8 +659,7 @@ mp.register_event("shutdown", save)
                 }
 
                 cmd.env("DISPLAY", ":0");
-                cmd.arg("--vo=gpu");
-                cmd.arg("--gpu-context=x11");
+                // Biarkan mpv menentukan video output (vo) yang cocok di Termux
             }
 
             cmd.arg("--hwdec=auto-safe");
@@ -706,19 +713,35 @@ mp.register_event("shutdown", save)
             let _ = std::fs::remove_file(&track_script);
         },
         1 => {
-            println!("Sedang memutar video di VLC... (Tutup VLC untuk kembali ke menu)");
-            let vlc_bin = resolve_command_path("vlc");
-            let mut cmd = Command::new(&vlc_bin);
-            if start_seconds > 0 {
-                cmd.arg(format!("--start-time={}", start_seconds));
+            if is_android {
+                println!("Membuka aplikasi video player bawaan Android...");
+                let status = Command::new("am")
+                    .args(&["start", "--user", "0", "-a", "android.intent.action.VIEW", "-d", stream_url, "-t", "video/*"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+                
+                if status.is_err() || !status.unwrap().success() {
+                    eprintln!("{} Gagal memanggil pemutar video Android", "■".red());
+                } else {
+                    println!("Silahkan tonton di aplikasi pilihanmu!");
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+            } else {
+                println!("Sedang memutar video di VLC... (Tutup VLC untuk kembali ke menu)");
+                let vlc_bin = resolve_command_path("vlc");
+                let mut cmd = Command::new(&vlc_bin);
+                if start_seconds > 0 {
+                    cmd.arg(format!("--start-time={}", start_seconds));
+                }
+                if provider_type == PROVIDER_OTAKUDESU {
+                    cmd.arg("--http-referrer=https://desustream.net/");
+                    cmd.arg("--http-user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36");
+                }
+                if let Ok(status) = cmd.arg(stream_url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status() {
+                    if !status.success() { eprintln!("{} Gagal memutar video di VLC", "■".red()); }
+                } else { eprintln!("{} VLC tidak ditemukan!", "■".red()); }
             }
-            if provider_type == PROVIDER_OTAKUDESU {
-                cmd.arg("--http-referrer=https://desustream.net/");
-                cmd.arg("--http-user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36");
-            }
-            if let Ok(status) = cmd.arg(stream_url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status() {
-                if !status.success() { eprintln!("{} Gagal memutar video di VLC", "■".red()); }
-            } else { eprintln!("{} VLC tidak ditemukan!", "■".red()); }
         },
         2 => {
             if open::that(stream_url).is_ok() {
