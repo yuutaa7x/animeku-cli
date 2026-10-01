@@ -71,7 +71,7 @@ async fn fetch_suggestions(query: String, tx: mpsc::Sender<FetchResult>) {
     }
 }
 
-pub async fn get_live_input(prompt: &str) -> anyhow::Result<Option<String>> {
+pub async fn get_live_input(prompt: &str) -> anyhow::Result<Option<(String, bool)>> {
     let mut stdout_handle = stdout();
     enable_raw_mode()?;
     
@@ -151,7 +151,7 @@ pub async fn get_live_input(prompt: &str) -> anyhow::Result<Option<String>> {
     tokio::pin!(debounce_timer);
     
     let mut fetch_task: Option<tokio::task::JoinHandle<()>> = None;
-    let mut final_result = None;
+    let mut final_result: Option<(String, bool)> = None;
 
     loop {
         tokio::select! {
@@ -209,12 +209,12 @@ pub async fn get_live_input(prompt: &str) -> anyhow::Result<Option<String>> {
                             KeyCode::Enter => {
                                 if let Some(idx) = selected_index {
                                     if idx < suggestions.len() {
-                                        final_result = Some(suggestions[idx].clone());
+                                        final_result = Some((suggestions[idx].clone(), true));
                                         break;
                                     }
                                 }
                                 if !input.trim().is_empty() {
-                                    final_result = Some(input.clone());
+                                    final_result = Some((input.clone(), false));
                                     break;
                                 }
                             }

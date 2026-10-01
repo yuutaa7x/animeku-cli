@@ -124,26 +124,33 @@ pub fn delete_watch_entry(index: usize) {
 /// Tanya jenis konten → tentukan provider.
 /// Movie / Series → Idlix otomatis.
 /// Anime → pilih Idlix atau Otakudesu.
-pub async fn pick_provider(title: &str) -> anyhow::Result<usize> {
+pub async fn pick_provider(title: &str, is_from_suggestion: bool) -> anyhow::Result<usize> {
     use std::io::Write;
     use crossterm::style::Stylize;
     
     print!("{} Mendeteksi jenis konten... ", "◆".blue());
     std::io::stdout().flush().unwrap();
 
-    let query_payload = serde_json::json!({
-        "query": "query ($search: String) { Media(search: $search, type: ANIME, sort: POPULARITY_DESC) { id } }",
-        "variables": { "search": title }
-    });
+    let mut is_anime = is_from_suggestion;
 
-    let mut is_anime = false;
-    if let Ok(client) = reqwest::Client::builder().timeout(std::time::Duration::from_secs(3)).build() {
-        if let Ok(res) = client.post("https://graphql.anilist.co").json(&query_payload).send().await {
-            if res.status().is_success() {
-                if let Ok(json) = res.json::<serde_json::Value>().await {
-                    if let Some(media) = json.pointer("/data/Media") {
-                        if !media.is_null() {
-                            is_anime = true;
+    if !is_anime {
+        let query_payload = serde_json::json!({
+            "query": "query ($search: String) { Media(search: $search, type: ANIME, sort: POPULARITY_DESC) { title { romaji english } } }",
+            "variables": { "search": title }
+        });
+
+        if let Ok(client) = reqwest::Client::builder().timeout(std::time::Duration::from_secs(3)).build() {
+            if let Ok(res) = client.post("https://graphql.anilist.co").json(&query_payload).send().await {
+                if res.status().is_success() {
+                    if let Ok(json) = res.json::<serde_json::Value>().await {
+                        if let Some(media) = json.pointer("/data/Media") {
+                            let romaji = media.pointer("/title/romaji").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
+                            let english = media.pointer("/title/english").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
+                            let t = title.to_lowercase();
+                            
+                            if !t.is_empty() && (romaji == t || english == t || romaji.starts_with(&t) || english.starts_with(&t)) {
+                                is_anime = true;
+                            }
                         }
                     }
                 }
@@ -185,21 +192,21 @@ pub async fn get_user_input() -> anyhow::Result<Option<Input>> {
         .items(&items)
         .interact_opt()?;
 
-    let title = match selection {
+    let (title, is_sugg) = match selection {
         // User pressed Escape / closed
         None => return Ok(None),
         Some(0) => {
             // "New search" selected → use custom live async autocomplete!
             let res = crate::live_input::get_live_input("Masukan judul anime/movie").await?;
-            let raw = res.unwrap_or_default();
+            let (raw, is_s) = res.unwrap_or_default();
             if raw.trim().eq_ignore_ascii_case("q") || raw.trim().is_empty() {
                 return Ok(None);
             }
-            raw.trim().to_string()
+            (raw.trim().to_string(), is_s)
         }
         Some(idx) => {
             // History item chosen directly
-            items[idx].clone()
+            (items[idx].clone(), false)
         }
     };
 
@@ -209,7 +216,7 @@ pub async fn get_user_input() -> anyhow::Result<Option<Input>> {
 
     save_history(&title);
 
-    let tipe = pick_provider(&title).await?;
+    let tipe = pick_provider(&title, is_sugg).await?;
 
     Ok(Some(Input { title, tipe }))
 }
