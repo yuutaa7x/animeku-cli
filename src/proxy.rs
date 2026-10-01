@@ -9,7 +9,7 @@ pub async fn start_proxy(provider_id: usize) -> anyhow::Result<u16> {
     
     let client = Arc::new(
         Client::builder()
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36")
+            .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             .build()?
     );
 
@@ -124,10 +124,11 @@ async fn handle_connection(socket: &mut TcpStream, client: Arc<Client>, port: u1
         Err(_) => return Ok(()),
     };
 
+    let status = res.status().as_u16();
     let content_type = res.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("application/octet-stream").to_string();
     let is_m3u8 = target_url.contains(".m3u8") || content_type.contains("mpegurl") || content_type.contains("x-mpegURL");
 
-    let header = format!("HTTP/1.1 200 OK\r\nContent-Type: {}\r\nConnection: close\r\n\r\n", content_type);
+    let header = format!("HTTP/1.1 {} OK\r\nContent-Type: {}\r\nConnection: close\r\n\r\n", status, content_type);
     socket.write_all(header.as_bytes()).await?;
 
     if is_m3u8 {
