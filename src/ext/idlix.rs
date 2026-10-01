@@ -14,7 +14,15 @@ use crate::{
 const CHROME_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 fn cookie_cache_path() -> String { crate::util::temp_file("animeku_idlix_cookies.txt") }
 fn audio_playlist_path() -> String { crate::util::temp_file("animeku_idlix_audio.m3u8") }
-fn subtitle_file_path() -> String { crate::util::temp_file("animeku_idlix.vtt") }
+fn subtitle_file_path() -> String {
+    if std::env::var("TERMUX_VERSION").is_ok() {
+        let sdcard = "/sdcard/Download/animeku_idlix.vtt";
+        if std::fs::write(sdcard, "").is_ok() {
+            return sdcard.to_string();
+        }
+    }
+    crate::util::temp_file("animeku_idlix.vtt")
+}
 const DEFAULT_REDEEM_URL: &str = "https://e2e.majorplay.net/api/play";
 const BANDWIDTH_1080P: u64 = 2_000_000;
 const BANDWIDTH_720P: u64 = 800_000;
@@ -469,12 +477,10 @@ impl Ext for Idlix {
             });
         }
 
-        if streams.is_empty() {
-            streams.push(Stream {
-                url: master_url.to_string(),
-                title: "Idlix Master Stream".to_string(),
-            });
-        }
+        streams.push(Stream {
+            url: master_url.to_string(),
+            title: "Idlix [Auto / Android Native]".to_string(),
+        });
 
         println!(" {}", "✓ Berhasil!".green());
         Ok(streams)

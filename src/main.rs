@@ -715,12 +715,18 @@ mp.register_event("shutdown", save)
         1 => {
             if is_android {
                 println!("Membuka aplikasi video player bawaan Android...");
-                // Gunakan termux-open agar file lokal di-convert ke content:// URI
-                let status = Command::new("termux-open")
-                    .arg(stream_url)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
+                let mut cmd = Command::new("am");
+                cmd.args(&["start", "--user", "0", "-a", "android.intent.action.VIEW", "-d", stream_url, "-t", "video/*"]);
+                
+                // Tambahkan subtitle jika ada di folder Download
+                let sub_path = "/sdcard/Download/animeku_idlix.vtt";
+                if std::path::Path::new(sub_path).exists() {
+                    cmd.args(&["--string-array", "subtitles_location", &format!("file://{}", sub_path)]);
+                }
+
+                let status = cmd.stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null())
+                                .status();
                 
                 if status.is_err() || !status.unwrap().success() {
                     eprintln!("{} Gagal memanggil pemutar video Android", "■".red());
