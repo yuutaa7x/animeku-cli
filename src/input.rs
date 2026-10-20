@@ -1,6 +1,6 @@
 use std::fs;
 
-use dialoguer::console::{style, Key, Term};
+use dialoguer::console::{style, truncate_str, Key, Term};
 
 // ─── Search History ───────────────────────────────────────────────────────────
 
@@ -310,6 +310,10 @@ fn step_selectable(
     current
 }
 
+fn fit_line(text: &str, width: usize) -> String {
+    truncate_str(text, width.max(1), "…").into_owned()
+}
+
 fn visible_entries(entries: &[MenuEntry], filter: &str) -> Vec<usize> {
     let query = filter.trim().to_lowercase();
     if query.is_empty() {
@@ -375,20 +379,27 @@ fn run_select_menu(
             selected = first_selectable(entries, &visible);
         }
 
-        let prompt_line = if filter.is_empty() {
-            format!("{} {}", style("?").cyan(), prompt)
+        let (rows, columns) = term.size();
+        let columns = columns as usize;
+        let prompt_text = if filter.is_empty() {
+            prompt.to_string()
         } else {
-            format!("{} {} {}", style("?").cyan(), prompt, style(&filter).cyan())
+            format!("{} {}", prompt, filter)
         };
-        term.write_line(&prompt_line)?;
+        let prompt_text = fit_line(&prompt_text, columns.saturating_sub(2));
+        term.write_line(&format!("{} {}", style("?").cyan(), prompt_text))?;
         let mut lines = 1usize;
 
         if visible.is_empty() {
-            term.write_line(&format!("  {}", style("(tidak ada hasil)").dim()))?;
+            let empty = fit_line("(tidak ada hasil)", columns.saturating_sub(2));
+            term.write_line(&format!("  {}", style(&empty).dim()))?;
             lines += 1;
         } else {
-            let rows = term.size().0 as usize;
-            let max_rows = rows.saturating_sub(3).clamp(1, 10).min(visible.len());
+            let max_rows = (rows as usize)
+                .saturating_sub(3)
+                .clamp(1, 10)
+                .min(visible.len());
+            let item_width = columns.saturating_sub(2).max(1);
             let selected_position = selected
                 .and_then(|index| visible.iter().position(|&item| item == index))
                 .unwrap_or(0);
@@ -397,16 +408,17 @@ fn run_select_menu(
 
             for &index in &visible[start..end] {
                 let entry = &entries[index];
+                let label = fit_line(&entry.label, item_width);
                 if !entry.selectable {
-                    term.write_line(&format!("  {}", style(&entry.label).dim()))?;
+                    term.write_line(&format!("  {}", style(&label).dim()))?;
                 } else if Some(index) == selected {
                     term.write_line(&format!(
                         "{} {}",
                         style("❯").cyan(),
-                        style(&entry.label).cyan()
+                        style(&label).cyan()
                     ))?;
                 } else {
-                    term.write_line(&format!("  {}", entry.label))?;
+                    term.write_line(&format!("  {}", label))?;
                 }
                 lines += 1;
             }
@@ -441,12 +453,9 @@ fn run_select_menu(
             Key::Enter => {
                 if let Some(index) = selected {
                     term.clear_last_lines(drawn_lines)?;
-                    term.write_line(&format!(
-                        "{} {} {}",
-                        style("?").cyan(),
-                        prompt,
-                        style(&entries[index].label).cyan()
-                    ))?;
+                    let final_line = format!("? {} {}", prompt, entries[index].label);
+                    let final_line = fit_line(&final_line, term.size().1 as usize);
+                    term.write_line(&format!("{}", style(&final_line).cyan()))?;
                     term.flush()?;
                     return Ok(Some(index));
                 }
@@ -503,5 +512,15 @@ mod tests {
         ];
         let visible = visible_entries(&entries, "");
         assert_eq!(first_selectable(&entries, &visible), Some(1));
+    }
+
+    #[test]
+    fn long_labels_are_truncated_to_one_terminal_line() {
+        let fitted = fit_line(
+            "[ Lanjutkan: [Series] Takopi's Original Sin - S1E01 - To You in 2016 | 00:43 | Idlix ]",
+            60,
+        );
+        assert!(dialoguer::console::measure_text_width(&fitted) <= 60);
+        assert!(fitted.ends_with('…'));
     }
 }
