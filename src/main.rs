@@ -827,12 +827,15 @@ async fn handle_movie_episodes(
     provider_type: usize,
     discord: &mut Option<DiscordIpcClient>,
 ) -> anyhow::Result<()> {
-    loop {
+    'movie_list: loop {
         clearscreen_and_show_banner()?;
         let mut episode = match animeku.extract_episode(movie.clone()).await? {
             Some(ep) => ep,
             None => break, // Back to movie search
         };
+        // Full movies skip the episode picker, so cancelling the stream picker
+        // should return to search instead of looping back to the same movie.
+        let single_movie = !episode.is_series;
 
         loop {
             let season_num = detect_season_for_episode(animeku, movie, &episode);
@@ -864,6 +867,9 @@ async fn handle_movie_episodes(
                 });
             } else {
                 reset_discord_status(discord);
+                if single_movie {
+                    break 'movie_list;
+                }
                 break;
             }
             
@@ -891,6 +897,11 @@ async fn handle_movie_episodes(
                 }
             }
             
+            // A finished full movie has no episode list to return to.
+            if single_movie {
+                break 'movie_list;
+            }
+
             // If no next episode, or user declined, break back to episode selection
             break;
         }

@@ -348,6 +348,12 @@ impl AnimekuCli {
         }
         println!();
 
+        // A full movie has exactly one non-series entry, so an episode picker
+        // would only ask the user to confirm the only possible choice.
+        if episodes.len() == 1 && !episodes[0].is_series {
+            return Ok(Some(episodes[0].clone()));
+        }
+
         let total_pages = episodes.len().div_ceil(EPISODES_PER_PAGE) as u64;
         let mut page = 1usize;
 
@@ -503,6 +509,47 @@ mod tests {
         assert_eq!(first.and_then(|meta| meta.thumb_url).as_deref(), expected);
         assert_eq!(second.and_then(|meta| meta.thumb_url).as_deref(), expected);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    struct SingleMovieExt;
+
+    #[async_trait::async_trait]
+    impl crate::ext::Ext for SingleMovieExt {
+        async fn search(
+            &mut self,
+            _title: String,
+            _page: usize,
+        ) -> anyhow::Result<(Vec<Movie>, u64)> {
+            Ok((Vec::new(), 1))
+        }
+
+        async fn get_episodes(&self, _movie: Movie) -> anyhow::Result<(Vec<Episode>, Meta)> {
+            Ok((
+                vec![Episode {
+                    id: "movie|42".into(),
+                    title: "Putar Film (Full Movie)".into(),
+                    is_series: false,
+                }],
+                Meta::default(),
+            ))
+        }
+
+        async fn get_stream_urls(&self, _episode: Episode) -> anyhow::Result<Vec<Stream>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn full_movie_skips_episode_picker() {
+        let mut cli = AnimekuCli::new(Box::new(SingleMovieExt));
+        let selected = cli
+            .extract_episode(movie("movie|42"))
+            .await
+            .unwrap()
+            .expect("full movie should be selected automatically");
+
+        assert_eq!(selected.id, "movie|42");
+        assert!(!selected.is_series);
     }
 
     fn movie(id: &str) -> Movie {
