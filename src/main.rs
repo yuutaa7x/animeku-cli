@@ -437,7 +437,65 @@ fn show_health_screen() -> anyhow::Result<bool> {
     }
 }
 
-fn update_discord_status(
+fn is_otakudesu_image(url: &str) -> bool {
+    url.to_ascii_lowercase().contains("otakudesu")
+}
+
+/// Resolve a Discord-compatible poster URL. Otakudesu's own image host is
+/// blocked when Discord tries to fetch it, so use AniList's cover CDN instead.
+async fn resolve_discord_poster(thumb_url: Option<String>, movie_title: &str) -> String {
+    let Some(url) = thumb_url else {
+        return DEFAULT_DISCORD_LOGO.to_string();
+    };
+    if !is_otakudesu_image(&url) {
+        return url;
+    }
+
+    let lookup_title = crate::models::clean_movie_title(movie_title);
+    let lookup_title = if lookup_title.is_empty() {
+        movie_title
+    } else {
+        lookup_title.as_str()
+    };
+
+    fetch_anilist_cover(lookup_title)
+        .await
+        .unwrap_or_else(|| DEFAULT_DISCORD_LOGO.to_string())
+}
+
+async fn fetch_anilist_cover(title: &str) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .ok()?;
+    let query = r#"
+        query ($search: String) {
+            Media(search: $search, type: ANIME) {
+                coverImage { extraLarge large }
+            }
+        }
+    "#;
+    let response = client
+        .post("https://graphql.anilist.co")
+        .json(&serde_json::json!({
+            "query": query,
+            "variables": { "search": title }
+        }))
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+
+    let value: serde_json::Value = response.json().await.ok()?;
+    value["data"]["Media"]["coverImage"]["extraLarge"]
+        .as_str()
+        .or_else(|| value["data"]["Media"]["coverImage"]["large"].as_str())
+        .map(str::to_string)
+}
+
+async fn update_discord_status(
     discord: &mut Option<DiscordIpcClient>,
     movie_title: &str,
     episode_title: &str,
@@ -450,7 +508,7 @@ fn update_discord_status(
         None => return,
     };
 
-    let large_image = thumb_url.unwrap_or_else(|| DEFAULT_DISCORD_LOGO.to_string());
+    let large_image = resolve_discord_poster(thumb_url, movie_title).await;
 
     let clean_movie = clean_title(movie_title);
     let clean_ep = clean_title(episode_title);
@@ -760,7 +818,15 @@ async fn handle_movie_episodes(
             let meta_opt = animeku.get_meta(&movie.id);
             let thumb_url = meta_opt.and_then(|m| m.thumb_url);
             
-            update_discord_status(discord, &movie.title, &episode.title, episode.is_series, season_num, thumb_url);
+            update_discord_status(
+                discord,
+                &movie.title,
+                &episode.title,
+                episode.is_series,
+                season_num,
+                thumb_url,
+            )
+            .await;
 
             let stream_opt = animeku.extract_stream_urls(episode.clone()).await?;
             if let Some(stream) = stream_opt {
@@ -1083,7 +1149,8 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
                 selected_watch.episode.is_series,
                 season_num,
                 thumb_url,
-            );
+            )
+            .await;
 
             let stream_opt = animeku.extract_stream_urls(selected_watch.episode.clone()).await?;
             if let Some(stream) = stream_opt {
@@ -1243,5 +1310,27 @@ mod main_tests {
         assert!(!p.contains('\\'));
     }
 
+    #[tokio::test]
+    async fn test_discord_poster_resolution() {
+        assert_eq!(
+            resolve_discord_poster(None, "Whatever").await,
+            DEFAULT_DISCORD_LOGO
+        );
+
+        let tmdb = "https://image.tmdb.org/t/p/w500/poster.jpg";
+        assert_eq!(
+            resolve_discord_poster(Some(tmdb.to_string()), "Whatever").await,
+            tmdb
+        );
+        assert!(is_otakudesu_image("https://otakudesu.blog/poster.jpg"));
+        assert!(!is_otakudesu_image(tmdb));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires network access to AniList"]
+    async fn test_anilist_cover_lookup() {
+        let cover = fetch_anilist_cover("Takopii no Genzai").await;
+        assert!(cover.is_some_and(|url| url.contains("anilist")));
+    }
 }
 
