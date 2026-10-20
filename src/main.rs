@@ -872,6 +872,17 @@ enum EpisodePlayback {
     StreamCancelled,
 }
 
+fn confirm_next_episode(next_ep: &crate::models::Episode) -> anyhow::Result<bool> {
+    Ok(dialoguer::Confirm::with_theme(&crate::util::custom_theme())
+        .with_prompt(format!("Lanjut ke {}?", next_ep.title.trim()))
+        .default(true)
+        // `default(true)` membuat dialoguer menampilkan kata "yes" sebagai
+        // hint sebelum user menjawab. Sembunyikan hint itu, tapi Enter tetap
+        // berarti "ya".
+        .show_default(false)
+        .interact()?)
+}
+
 /// Play one episode and persist its progress. Returning a distinct result for
 /// "player cancelled" and "stream picker cancelled" lets the caller reopen the
 /// right screen instead of treating a cancelled playback as finished.
@@ -960,17 +971,7 @@ async fn handle_movie_episodes(
                             .and_then(|episodes| find_next_episode(&episodes, &episode).cloned());
 
                         if let Some(next_ep) = next_ep_opt {
-                            let confirm =
-                                dialoguer::Confirm::with_theme(&crate::util::custom_theme())
-                                    .with_prompt(format!("Lanjut ke {}?", next_ep.title.trim()))
-                                    .default(true)
-                                    // `default(true)` membuat dialoguer menampilkan
-                                    // kata "yes" sebagai hint sebelum user menjawab.
-                                    // Sembunyikan hint itu, tapi Enter tetap "ya".
-                                    .show_default(false)
-                                    .interact()?;
-
-                            if confirm {
+                            if confirm_next_episode(&next_ep)? {
                                 episode = next_ep;
                                 continue;
                             }
@@ -1241,49 +1242,47 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
 
             let start_seconds = if action_choice == 0 { selected_watch.position_seconds } else { 0 };
 
-            clearscreen_and_show_banner()?;
-
-            let season_num = if selected_watch.episode.is_series {
-                detect_season_from_titles(
-                    &selected_watch.movie.title,
-                    &selected_watch.episode.title,
-                )
-                .unwrap_or(1)
-            } else {
-                1
-            };
-
             let mut animeku = AnimekuCli::new(get_ext_by_provider(selected_watch.provider_type));
-            let thumb_url = animeku
-                .ensure_meta(&selected_watch.movie)
-                .await
-                .and_then(|meta| meta.thumb_url);
+            // Populate the episode cache so auto-next can follow the provider's
+            // ordered list instead of stopping after the resumed episode.
+            let _ = animeku.ensure_meta(&selected_watch.movie).await;
 
-            update_discord_status(
-                discord,
-                &display_title,
-                &display_episode,
-                selected_watch.episode.is_series,
-                season_num,
-                thumb_url,
-            )
-            .await;
+            let mut episode = selected_watch.episode.clone();
+            let mut start_seconds = start_seconds;
 
-            let stream_opt = animeku.extract_stream_urls(selected_watch.episode.clone()).await?;
-            if let Some(stream) = stream_opt {
-                let outcome =
-                    execute_player(&stream.url, selected_watch.provider_type, start_seconds).await?;
-                if let PlaybackOutcome::Played { position, .. } = outcome {
-                    input::save_watch_entry(&crate::models::WatchEntry {
-                        movie: selected_watch.movie.clone(),
-                        episode: selected_watch.episode.clone(),
-                        provider_type: selected_watch.provider_type,
-                        position_seconds: position,
-                        updated_at: 0,
-                    });
+            loop {
+                match play_episode(
+                    &mut animeku,
+                    &selected_watch.movie,
+                    &episode,
+                    selected_watch.provider_type,
+                    start_seconds,
+                    discord,
+                )
+                .await?
+                {
+                    EpisodePlayback::PlayerCancelled => continue,
+                    EpisodePlayback::StreamCancelled => break,
+                    EpisodePlayback::Played { offer_next } => {
+                        if offer_next {
+                            let next_ep_opt = animeku
+                                .get_episode_list(&selected_watch.movie.id)
+                                .and_then(|episodes| {
+                                    find_next_episode(&episodes, &episode).cloned()
+                                });
+
+                            if let Some(next_ep) = next_ep_opt {
+                                if confirm_next_episode(&next_ep)? {
+                                    episode = next_ep;
+                                    start_seconds = 0;
+                                    continue;
+                                }
+                            }
+                        }
+                        break;
+                    }
                 }
             }
-            reset_discord_status(discord);
 
         } else {
             // Picked from Search History
