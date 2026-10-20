@@ -442,8 +442,9 @@ fn is_otakudesu_image(url: &str) -> bool {
     url.to_ascii_lowercase().contains("otakudesu")
 }
 
-/// Pad a portrait poster into a square canvas so Discord's square RPC image
-/// box shows the whole poster instead of cropping its top and bottom.
+/// Fill a square canvas with the poster. Discord's RPC image box is square,
+/// so `fit=cover` zooms instead of adding letterbox bars. `a=attention` asks
+/// wsrv.nl to keep faces and visually busy parts in frame while cropping.
 fn square_discord_poster(image_url: &str) -> String {
     // wsrv.nl refuses to fetch AniList directly, so route it through
     // DuckDuckGo's public image proxy first.
@@ -452,7 +453,7 @@ fn square_discord_poster(image_url: &str) -> String {
         urlencoding::encode(image_url)
     );
     format!(
-        "https://wsrv.nl/?url={}&w=512&h=512&fit=contain&bg=1e1f22&output=jpg",
+        "https://wsrv.nl/?url={}&w=512&h=512&fit=cover&a=attention&output=jpg",
         urlencoding::encode(&duckduckgo_proxy)
     )
 }
@@ -1355,7 +1356,7 @@ mod main_tests {
             "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx185407-7uzY4fA3hokP.jpg",
         );
         assert!(square.starts_with("https://wsrv.nl/?url="));
-        assert!(square.contains("w=512&h=512&fit=contain"));
+        assert!(square.contains("w=512&h=512&fit=cover&a=attention"));
         assert!(square.len() <= DISCORD_IMAGE_MAX_LEN);
     }
 
