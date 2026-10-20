@@ -67,7 +67,10 @@ impl AnimekuCli {
                         "■".red(),
                         "Silahkan periksa kembali kata kunci pencarian\n".yellow()
                     );
-                    std::process::exit(0);
+                    println!("Tekan Enter untuk kembali ke pencarian...");
+                    let mut dummy = String::new();
+                    let _ = std::io::stdin().read_line(&mut dummy);
+                    return Ok(None);
                 }
                 page -= 1;
                 is_latest = true;
@@ -125,8 +128,15 @@ impl AnimekuCli {
 
         let (episodes, meta) = self.episode_cache.get(&id).unwrap().to_owned();
         if episodes.is_empty() {
-            println!("tidak berhasil!");
-            std::process::exit(0);
+            eprintln!(
+                "tidak berhasil!\n{} {}",
+                "■".red(),
+                "Daftar episode tidak tersedia untuk judul ini.\n".yellow()
+            );
+            println!("Tekan Enter untuk kembali ke daftar judul...");
+            let mut dummy = String::new();
+            let _ = std::io::stdin().read_line(&mut dummy);
+            return Ok(None);
         }
 
         println!("berhasil");
@@ -185,9 +195,12 @@ impl AnimekuCli {
             eprintln!(
                 "gagal!\n{} {}",
                 "■".red(),
-                "Silahkan jalankan ulang program\n".yellow()
+                "Server stream tidak ditemukan atau sedang offline.\n".yellow()
             );
-            std::process::exit(0);
+            println!("Tekan Enter untuk kembali...");
+            let mut dummy = String::new();
+            let _ = std::io::stdin().read_line(&mut dummy);
+            return Ok(None);
         }
         println!("berhasil");
 

@@ -14,6 +14,41 @@ pub fn temp_file(name: &str) -> String {
         .replace('\\', "/")
 }
 
+pub fn is_android() -> bool {
+    std::env::var("TERMUX_VERSION").is_ok()
+}
+
+pub fn get_subtitle_path() -> String {
+    if is_android() {
+        let download_dir = std::path::Path::new("/sdcard/Download");
+        if download_dir.is_dir() {
+            let sdcard = "/sdcard/Download/animeku_idlix.vtt";
+            if std::fs::OpenOptions::new().create(true).write(true).open(sdcard).is_ok() {
+                return sdcard.to_string();
+            }
+        }
+    }
+    temp_file("animeku_idlix.vtt")
+}
+
+pub fn cleanup_temp_files() {
+    let temp_dir = std::env::temp_dir();
+    if let Ok(entries) = std::fs::read_dir(temp_dir) {
+        for entry in entries.flatten() {
+            if let Ok(name) = entry.file_name().into_string() {
+                if name.starts_with("animeku_idlix_video_")
+                    || name == "animeku_idlix_audio.m3u8"
+                    || name == "animeku_track.lua"
+                    || name == "animeku_last_pos.txt"
+                    || name == "animeku_proxy_debug.txt"
+                {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+}
+
 use reqwest::Client;
 
 #[macro_export]

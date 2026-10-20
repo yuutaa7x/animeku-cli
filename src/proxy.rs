@@ -1,15 +1,22 @@
+use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::AsyncWriteExt;
 
 pub async fn start_proxy(provider_id: usize) -> anyhow::Result<u16> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
+    let client = Arc::new(
+        reqwest::Client::builder()
+            .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            .build()?
+    );
 
     tokio::spawn(async move {
         loop {
             if let Ok((mut socket, _)) = listener.accept().await {
+                let client = Arc::clone(&client);
                 tokio::spawn(async move {
-                    let _ = handle_connection(&mut socket, port, provider_id).await;
+                    let _ = handle_connection(&mut socket, port, provider_id, &client).await;
                 });
             }
         }
@@ -97,7 +104,27 @@ fn rewrite_m3u8(text: &str, target_url: &str, port: u16) -> String {
     rewritten
 }
 
-async fn handle_connection(socket: &mut TcpStream, port: u16, provider_id: usize) -> anyhow::Result<()> {
+fn read_cookies_from_jar(path: &str) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let mut pairs = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() >= 7 {
+            pairs.push(format!("{}={}", parts[5], parts[6]));
+        }
+    }
+    if pairs.is_empty() {
+        None
+    } else {
+        Some(pairs.join("; "))
+    }
+}
+
+async fn handle_connection(socket: &mut TcpStream, port: u16, provider_id: usize, client: &reqwest::Client) -> anyhow::Result<()> {
     let mut buf = [0; 4096];
     let n = tokio::io::AsyncReadExt::read(socket, &mut buf).await?;
     let request = String::from_utf8_lossy(&buf[..n]);
@@ -121,12 +148,10 @@ async fn handle_connection(socket: &mut TcpStream, port: u16, provider_id: usize
     }
     
     if path.starts_with("/?sub=1") {
-        let sub_path = "/sdcard/Download/animeku_idlix.vtt";
-        let sub_path2 = crate::util::temp_file("animeku_idlix.vtt");
-        let active_path = if tokio::fs::metadata(sub_path).await.is_ok() { sub_path } else { &sub_path2 };
+        let active_path = crate::util::get_subtitle_path();
         
         let mut duration = 1440.0;
-        if let Ok(content) = tokio::fs::read_to_string(active_path).await {
+        if let Ok(content) = tokio::fs::read_to_string(&active_path).await {
             if let Some(last_arrow) = content.rfind("-->") {
                 let after_arrow = &content[last_arrow + 3..];
                 let end_time_str = after_arrow.trim_start().split_whitespace().next().unwrap_or("");
@@ -156,21 +181,14 @@ async fn handle_connection(socket: &mut TcpStream, port: u16, provider_id: usize
     }
 
     if path.starts_with("/?vtt=1") {
-        let sub_path = "/sdcard/Download/animeku_idlix.vtt";
-        if let Ok(sub_content) = tokio::fs::read_to_string(sub_path).await {
+        let active_path = crate::util::get_subtitle_path();
+        if let Ok(sub_content) = tokio::fs::read_to_string(&active_path).await {
             let header = "HTTP/1.1 200 OK\r\nContent-Type: text/vtt\r\nConnection: close\r\n\r\n";
             socket.write_all(header.as_bytes()).await?;
             socket.write_all(sub_content.as_bytes()).await?;
         } else {
-            let sub_path2 = crate::util::temp_file("animeku_idlix.vtt");
-            if let Ok(sub_content) = tokio::fs::read_to_string(&sub_path2).await {
-                let header = "HTTP/1.1 200 OK\r\nContent-Type: text/vtt\r\nConnection: close\r\n\r\n";
-                socket.write_all(header.as_bytes()).await?;
-                socket.write_all(sub_content.as_bytes()).await?;
-            } else {
-                let header = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
-                socket.write_all(header.as_bytes()).await?;
-            }
+            let header = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
+            socket.write_all(header.as_bytes()).await?;
         }
         return Ok(());
     }
@@ -182,37 +200,34 @@ async fn handle_connection(socket: &mut TcpStream, port: u16, provider_id: usize
     let encoded_url = &path[6..];
     let target_url = urlencoding::decode(encoded_url)?.into_owned();
 
-    let mut cmd = tokio::process::Command::new("curl");
-    cmd.args(&[
-        "-s",
-        "-L",
-        "-A", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    ]);
+    let mut req = client.get(&target_url);
 
     if provider_id == crate::PROVIDER_OTAKUDESU {
-        cmd.args(&["-e", "https://desustream.net/"]);
+        req = req.header("Referer", "https://desustream.net/");
     } else {
-        cmd.args(&["-e", "https://z2.idlixku.com/"]);
+        req = req.header("Referer", "https://z2.idlixku.com/");
         let cookie_path = crate::util::temp_file("animeku_idlix_cookies.txt");
-        cmd.args(&["-b", &cookie_path]);
+        if let Some(cookie_hdr) = read_cookies_from_jar(&cookie_path) {
+            req = req.header("Cookie", cookie_hdr);
+        }
     }
     
     if let Some(r) = &range_header {
-        cmd.args(&["-H", &format!("Range: {}", r)]);
+        req = req.header("Range", r);
     }
 
-    cmd.arg(&target_url);
-    cmd.stdout(std::process::Stdio::piped());
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
+    let resp = match req.send().await {
+        Ok(r) => r,
         Err(_) => return Ok(()),
     };
 
-    let mut stdout = child.stdout.take().unwrap();
-    let mut body_bytes = Vec::new();
-    let _ = tokio::io::AsyncReadExt::read_to_end(&mut stdout, &mut body_bytes).await;
-    let _ = child.wait().await;
+    let status_code = resp.status().as_u16();
+    let resp_content_range = resp.headers()
+        .get("content-range")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let body_bytes = resp.bytes().await.unwrap_or_default();
 
     let is_m3u8 = body_bytes.starts_with(b"#EXTM3U");
     let content_type = if is_m3u8 {
@@ -221,20 +236,31 @@ async fn handle_connection(socket: &mut TcpStream, port: u16, provider_id: usize
         "application/octet-stream"
     };
 
-    let log_msg = format!("URL: {}\nLength: {}\nis_m3u8: {}\nSnippet: {}\n\n", 
-        target_url, 
-        body_bytes.len(), 
-        is_m3u8, 
-        String::from_utf8_lossy(&body_bytes.iter().copied().take(100).collect::<Vec<_>>())
-    );
-    if let Ok(mut f) = tokio::fs::OpenOptions::new().create(true).append(true).open("/sdcard/Download/proxy_debug.txt").await {
-        let _ = f.write_all(log_msg.as_bytes()).await;
+    if std::env::var("ANIMEKU_DEBUG").is_ok() {
+        let log_msg = format!("URL: {}\nLength: {}\nis_m3u8: {}\nStatus: {}\nSnippet: {}\n\n", 
+            target_url, 
+            body_bytes.len(), 
+            is_m3u8, 
+            status_code,
+            String::from_utf8_lossy(&body_bytes.iter().copied().take(100).collect::<Vec<_>>())
+        );
+        let debug_path = crate::util::temp_file("animeku_proxy_debug.txt");
+        if let Ok(mut f) = tokio::fs::OpenOptions::new().create(true).append(true).open(debug_path).await {
+            let _ = f.write_all(log_msg.as_bytes()).await;
+        }
     }
 
-    let mut header = format!("HTTP/1.1 200 OK\r\nContent-Type: {}\r\nConnection: close\r\n\r\n", content_type);
+    let mut header = if status_code == 206 {
+        let cr = resp_content_range.unwrap_or_else(|| {
+            format!("bytes 0-{}/*", body_bytes.len().saturating_sub(1))
+        });
+        format!("HTTP/1.1 206 Partial Content\r\nContent-Type: {}\r\nContent-Range: {}\r\nConnection: close\r\n\r\n", content_type, cr)
+    } else {
+        format!("HTTP/1.1 200 OK\r\nContent-Type: {}\r\nConnection: close\r\n\r\n", content_type)
+    };
     
-    // Support 206 Partial Content for video segments if Range was requested
-    if !is_m3u8 && range_header.is_some() && !body_bytes.is_empty() {
+    // Support 206 Partial Content for video segments if Range was requested but upstream returned 200
+    if status_code != 206 && !is_m3u8 && range_header.is_some() && !body_bytes.is_empty() {
         if let Some(r) = &range_header {
             if let Some(range_val) = r.to_lowercase().strip_prefix("bytes=") {
                 let parts: Vec<&str> = range_val.split('-').collect();
@@ -256,4 +282,20 @@ async fn handle_connection(socket: &mut TcpStream, port: u16, provider_id: usize
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_wrap_url() {
+        let base = "https://example.com/stream/master.m3u8";
+        let target = "seg1.ts";
+        let wrapped = wrap_url(base, target, 8080);
+        assert_eq!(
+            wrapped,
+            "http://127.0.0.1:8080/?url=https%3A%2F%2Fexample.com%2Fstream%2Fseg1.ts"
+        );
+    }
 }

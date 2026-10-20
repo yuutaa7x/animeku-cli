@@ -71,9 +71,25 @@ async fn fetch_suggestions(query: String, tx: mpsc::Sender<FetchResult>) {
     }
 }
 
+struct RawModeGuard;
+
+impl RawModeGuard {
+    fn new() -> std::io::Result<Self> {
+        enable_raw_mode()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(stdout(), cursor::Show);
+    }
+}
+
 pub async fn get_live_input(prompt: &str) -> anyhow::Result<Option<(String, bool)>> {
+    let _raw_guard = RawModeGuard::new()?;
     let mut stdout_handle = stdout();
-    enable_raw_mode()?;
     
     let mut input = String::new();
     let mut suggestions: Vec<String> = vec![];
@@ -267,21 +283,24 @@ pub async fn get_live_input(prompt: &str) -> anyhow::Result<Option<(String, bool
         }
     }
 
-    disable_raw_mode()?;
+    if let Some(t) = fetch_task.take() {
+        t.abort();
+    }
+
     // Cleanup screen to avoid leaving artifacts
     let lines_down = if is_loading { 1 } else { suggestions.len() as u16 };
-    queue!(
+    let _ = queue!(
         stdout(),
         cursor::MoveToColumn(0),
         Clear(ClearType::FromCursorDown)
-    )?;
+    );
     if lines_down > 0 {
         for _ in 0..lines_down {
-            queue!(stdout(), Print("\n"), Clear(ClearType::CurrentLine))?;
+            let _ = queue!(stdout(), Print("\n"), Clear(ClearType::CurrentLine));
         }
-        queue!(stdout(), cursor::MoveUp(lines_down))?;
+        let _ = queue!(stdout(), cursor::MoveUp(lines_down));
     }
-    stdout().flush()?;
+    let _ = stdout().flush();
     
     println!(); // Move to next line
 

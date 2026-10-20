@@ -2,6 +2,8 @@ use std::fs;
 
 // ─── Search History ───────────────────────────────────────────────────────────
 
+const MAX_SEARCH_HISTORY: usize = 50;
+
 pub fn load_history() -> Vec<String> {
     let mut history_items = vec![];
     if let Some(home) = dirs::home_dir() {
@@ -9,42 +11,48 @@ pub fn load_history() -> Vec<String> {
         if let Ok(content) = fs::read_to_string(path) {
             for line in content.lines() {
                 let trimmed = line.trim().to_string();
-                if !trimmed.is_empty() && !history_items.contains(&trimmed) {
+                if !trimmed.is_empty() && !history_items.iter().any(|h: &String| h.eq_ignore_ascii_case(&trimmed)) {
                     history_items.push(trimmed);
                 }
             }
         }
     }
+    history_items.truncate(MAX_SEARCH_HISTORY);
     history_items
 }
 
 pub fn save_history(title: &str) {
-    if let Some(home) = dirs::home_dir() {
-        let path = home.join(".animeku_history");
-        let history = load_history();
-        let cleaned = title.trim().to_string();
-        if !history.contains(&cleaned) {
-            use std::io::Write;
-            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-                let _ = writeln!(file, "{}", cleaned);
-            }
-        }
-    }
+    let Some(home) = dirs::home_dir() else { return; };
+    let path = home.join(".animeku_history");
+    let cleaned = title.trim().to_string();
+    if cleaned.is_empty() { return; }
+
+    let mut history = load_history();
+    history.retain(|h| !h.eq_ignore_ascii_case(&cleaned));
+    history.insert(0, cleaned);
+    history.truncate(MAX_SEARCH_HISTORY);
+
+    let new_content = if history.is_empty() {
+        String::new()
+    } else {
+        history.join("\n") + "\n"
+    };
+    let _ = fs::write(path, new_content);
 }
 
 /// Remove a single title from the search history file.
 pub fn delete_search_history_entry(title: &str) {
-    if let Some(home) = dirs::home_dir() {
-        let path = home.join(".animeku_history");
-        if let Ok(content) = fs::read_to_string(&path) {
-            let filtered: Vec<&str> = content
-                .lines()
-                .filter(|l| l.trim() != title.trim())
-                .collect();
-            let new_content = filtered.join("\n") + if filtered.is_empty() { "" } else { "\n" };
-            let _ = fs::write(path, new_content);
-        }
-    }
+    let Some(home) = dirs::home_dir() else { return; };
+    let path = home.join(".animeku_history");
+    let mut history = load_history();
+    let target = title.trim();
+    history.retain(|h| !h.eq_ignore_ascii_case(target));
+    let new_content = if history.is_empty() {
+        String::new()
+    } else {
+        history.join("\n") + "\n"
+    };
+    let _ = fs::write(path, new_content);
 }
 
 // ─── Watch History ────────────────────────────────────────────────────────────

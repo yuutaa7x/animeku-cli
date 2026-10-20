@@ -52,6 +52,7 @@ impl WatchEntry {
 }
 
 /// Backward-compatibility alias.
+pub type LastWatch = WatchEntry;
 
 /// Ordered watch history (most recent first), capped at 30 entries.
 

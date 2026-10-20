@@ -15,13 +15,7 @@ const CHROME_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537
 fn cookie_cache_path() -> String { crate::util::temp_file("animeku_idlix_cookies.txt") }
 fn audio_playlist_path() -> String { crate::util::temp_file("animeku_idlix_audio.m3u8") }
 fn subtitle_file_path() -> String {
-    if std::env::var("TERMUX_VERSION").is_ok() {
-        let sdcard = "/sdcard/Download/animeku_idlix.vtt";
-        if std::fs::write(sdcard, "").is_ok() {
-            return sdcard.to_string();
-        }
-    }
-    crate::util::temp_file("animeku_idlix.vtt")
+    crate::util::get_subtitle_path()
 }
 const DEFAULT_REDEEM_URL: &str = "https://e2e.majorplay.net/api/play";
 const BANDWIDTH_1080P: u64 = 2_000_000;
@@ -237,26 +231,39 @@ impl Ext for Idlix {
                 ],
             };
 
-            let mut episodes = vec![];
+            let mut tasks = Vec::new();
             for s in 1..=num_seasons {
                 let season_url = format!("{}/api/series/{}/season/{}", self.base_url, slug, s);
-                if let Ok(s_text) = curl_get(&season_url) {
-                    if let Ok(s_json) = serde_json::from_str::<Value>(&s_text) {
-                        if let Some(ep_list) = s_json["season"]["episodes"].as_array() {
-                            for ep in ep_list {
-                                let ep_id = ep["id"].as_str().unwrap_or("");
-                                let ep_num = ep["episodeNumber"].as_u64().unwrap_or(0);
-                                let ep_name = ep["name"].as_str().unwrap_or("");
+                tasks.push(tokio::task::spawn_blocking(move || {
+                    let s_text = curl_get(&season_url).ok()?;
+                    let s_json: Value = serde_json::from_str(&s_text).ok()?;
+                    let ep_list = s_json["season"]["episodes"].as_array()?.clone();
+                    let mut eps = Vec::new();
+                    for ep in ep_list {
+                        let ep_id = ep["id"].as_str().unwrap_or("");
+                        let ep_num = ep["episodeNumber"].as_u64().unwrap_or(0);
+                        let ep_name = ep["name"].as_str().unwrap_or("");
 
-                                episodes.push(Episode {
-                                    id: format!("episode|{}", ep_id),
-                                    title: format!("S{}E{:02} - {}", s, ep_num, ep_name),
-                                    is_series: true,
-                                });
-                            }
-                        }
+                        eps.push(Episode {
+                            id: format!("episode|{}", ep_id),
+                            title: format!("S{}E{:02} - {}", s, ep_num, ep_name),
+                            is_series: true,
+                        });
                     }
-                }
+                    Some((s, eps))
+                }));
+            }
+
+            let results = futures::future::join_all(tasks).await;
+            let mut season_episodes: Vec<(u64, Vec<Episode>)> = results
+                .into_iter()
+                .filter_map(|r| r.ok().flatten())
+                .collect();
+            season_episodes.sort_by_key(|(s, _)| *s);
+
+            let mut episodes = Vec::new();
+            for (_, eps) in season_episodes {
+                episodes.extend(eps);
             }
 
             Ok((episodes, meta))

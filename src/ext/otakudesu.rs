@@ -25,6 +25,40 @@ impl Otakudesu {
             base_url: "https://otakudesu.blog".to_string(),
         }
     }
+
+    async fn resolve_desustream(&self, url: &str) -> String {
+        if !url.contains("desustream") {
+            return url.to_string();
+        }
+        if let Ok(resp) = self.client.get(url).send().await {
+            if let Ok(text) = resp.text().await {
+                if let Some(extracted) = extract_desustream_url(&text) {
+                    return extracted;
+                }
+            }
+        }
+        url.to_string()
+    }
+}
+
+fn extract_between<'a>(text: &'a str, start_delim: &str, end_delim: &str) -> Option<&'a str> {
+    let start_idx = text.find(start_delim)?;
+    let rest = &text[start_idx + start_delim.len()..];
+    let end_idx = rest.find(end_delim)?;
+    Some(&rest[..end_idx])
+}
+
+fn extract_desustream_url(text: &str) -> Option<String> {
+    if let Some(src) = extract_between(text, "<source src=\"", "\"") {
+        return Some(src.to_string());
+    }
+    if let Some(file) = extract_between(text, "otakudesu('{\"file\":\"", "\"") {
+        return Some(file.to_string());
+    }
+    if let Some(file) = extract_between(text, "\"file\":\"", "\"") {
+        return Some(file.to_string());
+    }
+    None
 }
 
 #[async_trait]
@@ -95,8 +129,8 @@ impl Ext for Otakudesu {
         if let Ok(info_sel) = Selector::parse(".infozingle p") {
             for p in document.select(&info_sel) {
                 let clean = p.text().collect::<Vec<_>>().join(" ");
-                if let Some(idx) = clean.find(":") {
-                    meta.data.push((clean[..idx].trim().to_string(), clean[idx+1..].trim().to_string()));
+                if let Some((k, v)) = clean.split_once(':') {
+                    meta.data.push((k.trim().to_string(), v.trim().to_string()));
                 } else {
                     meta.data.push(("".to_string(), clean));
                 }
@@ -116,7 +150,7 @@ impl Ext for Otakudesu {
                 }
                 sinopsis_text.push_str(&clean);
             }
-            if sinopsis_text.len() > 320 {
+            if sinopsis_text.chars().count() > 320 {
                 let mut truncated = sinopsis_text.chars().take(320).collect::<String>();
                 truncated.push_str("...");
                 meta.data.push(("Sinopsis".to_string(), truncated));
@@ -158,30 +192,8 @@ impl Ext for Otakudesu {
         }
 
         if let Some(mut url) = default_url {
-            
-                                        if url.contains("desustream") {
-                                            if let Ok(resp) = self.client.get(&url).send().await {
-                                                if let Ok(text) = resp.text().await {
-                                                    if let Some(src_start) = text.find("<source src=\"") {
-                                                        let rest = &text[src_start + 13..];
-                                                        if let Some(src_end) = rest.find("\"") {
-                                                            url = rest[..src_end].to_string();
-                                                        }
-                                                    } else if let Some(file_start) = text.find("otakudesu('{\"file\":\"") {
-                                                        let rest = &text[file_start + 20..];
-                                                        if let Some(file_end) = rest.find("\"") {
-                                                            url = rest[..file_end].to_string();
-                                                        }
-                                                    } else if let Some(file_start) = text.find("\"file\":\"") {
-                                                        let rest = &text[file_start + 8..];
-                                                        if let Some(file_end) = rest.find("\"") {
-                                                            url = rest[..file_end].to_string();
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        streams.push(Stream {
+            url = self.resolve_desustream(&url).await;
+            streams.push(Stream {
                 url,
                 title: "Default".to_string(),
             });
@@ -227,43 +239,18 @@ impl Ext for Otakudesu {
                     if let Some(data) = m_json.get("data").and_then(|v| v.as_str()) {
                         if let Ok(html_bytes) = base64::prelude::BASE64_STANDARD.decode(data) {
                             if let Ok(html_str) = String::from_utf8(html_bytes) {
-                                if let Some(src_start) = html_str.find("src=\"") {
-                                    let rest = &html_str[src_start + 5..];
-                                    if let Some(src_end) = rest.find("\"") {
-                                        let mut url = rest[..src_end].to_string();
-                                        
-                                        if url.starts_with("//") {
-                                            url = format!("https:{}", url);
-                                        }
-                                        
-                                        if url.contains("desustream") {
-                                            if let Ok(resp) = self.client.get(&url).send().await {
-                                                if let Ok(text) = resp.text().await {
-                                                    if let Some(src_start) = text.find("<source src=\"") {
-                                                        let rest = &text[src_start + 13..];
-                                                        if let Some(src_end) = rest.find("\"") {
-                                                            url = rest[..src_end].to_string();
-                                                        }
-                                                    } else if let Some(file_start) = text.find("otakudesu('{\"file\":\"") {
-                                                        let rest = &text[file_start + 20..];
-                                                        if let Some(file_end) = rest.find("\"") {
-                                                            url = rest[..file_end].to_string();
-                                                        }
-                                                    } else if let Some(file_start) = text.find("\"file\":\"") {
-                                                        let rest = &text[file_start + 8..];
-                                                        if let Some(file_end) = rest.find("\"") {
-                                                            url = rest[..file_end].to_string();
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        streams.push(Stream {
-                                            url,
-                                            title: format!("Mirror - {}", name),
-                                        });
-
+                                if let Some(src) = extract_between(&html_str, "src=\"", "\"") {
+                                    let mut url = src.to_string();
+                                    
+                                    if url.starts_with("//") {
+                                        url = format!("https:{}", url);
                                     }
+                                    
+                                    url = self.resolve_desustream(&url).await;
+                                    streams.push(Stream {
+                                        url,
+                                        title: format!("Mirror - {}", name),
+                                    });
                                 }
                             }
                         }
@@ -273,5 +260,32 @@ impl Ext for Otakudesu {
         }
 
         Ok(streams)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_between() {
+        let sample = r#"<div class="test"><source src="https://example.com/video.mp4" type="video/mp4"></div>"#;
+        assert_eq!(
+            extract_between(sample, "<source src=\"", "\""),
+            Some("https://example.com/video.mp4")
+        );
+        assert_eq!(extract_between(sample, "nonexistent", "\""), None);
+    }
+
+    #[test]
+    fn test_extract_desustream_url() {
+        let html1 = r#"<source src="https://stream.desu/vid.mp4">"#;
+        assert_eq!(extract_desustream_url(html1), Some("https://stream.desu/vid.mp4".to_string()));
+
+        let html2 = r#"otakudesu('{"file":"https://stream.desu/otaku.mp4"}"#;
+        assert_eq!(extract_desustream_url(html2), Some("https://stream.desu/otaku.mp4".to_string()));
+
+        let html3 = r#"{"other":1,"file":"https://stream.desu/fallback.mp4"}"#;
+        assert_eq!(extract_desustream_url(html3), Some("https://stream.desu/fallback.mp4".to_string()));
     }
 }

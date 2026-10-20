@@ -23,7 +23,7 @@ fn idlix_audio_path() -> String {
 }
 
 fn idlix_subtitle_path() -> String {
-    crate::util::temp_file("animeku_idlix.vtt")
+    crate::util::get_subtitle_path()
 }
 
 fn mpv_track_script_path() -> String {
@@ -728,8 +728,8 @@ mp.register_event("shutdown", save)
                 println!("Membuka aplikasi video player bawaan Android (VLC)...");
                 
                 // Simpan subtitle ke folder Download agar user bisa nge-load manual
-                let sub_path = "/sdcard/Download/animeku_idlix.vtt";
-                if std::path::Path::new(sub_path).exists() {
+                let sub_path = crate::util::get_subtitle_path();
+                if std::path::Path::new(&sub_path).exists() && sub_path.contains("Download") {
                     println!("{} Subtitle disimpan di folder Download (animeku_idlix.vtt). Silahkan load manual di VLC.", "ℹ".yellow());
                 }
 
@@ -889,6 +889,9 @@ async fn handle_movie_episodes(
                     position_seconds: last_pos,
                     updated_at: 0,
                 });
+            } else {
+                reset_discord_status(discord);
+                break;
             }
             
             reset_discord_status(discord);
@@ -1260,6 +1263,8 @@ async fn handle_watch_mode(discord: &mut Option<DiscordIpcClient>) -> anyhow::Re
 }
 
 async fn run_app() -> anyhow::Result<()> {
+    crate::util::cleanup_temp_files();
+
     let mut discord = Some(DiscordIpcClient::new(DISCORD_APP_ID));
     if let Some(ref mut drpc) = discord {
         if drpc.connect().is_ok() {
@@ -1288,6 +1293,7 @@ async fn run_app() -> anyhow::Result<()> {
                 let _ = show_health_screen()?;
             }
             MENU_EXIT => {
+                crate::util::cleanup_temp_files();
                 println!("\nSampai jumpa lagi!\n");
                 return Ok(());
             }
@@ -1295,6 +1301,7 @@ async fn run_app() -> anyhow::Result<()> {
         }
     }
 
+    crate::util::cleanup_temp_files();
     Ok(())
 }
 
