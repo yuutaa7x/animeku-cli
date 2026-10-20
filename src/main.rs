@@ -24,6 +24,7 @@ use episode::{
 
 const DISCORD_APP_ID: &str = "1549897147577667784";
 const DEFAULT_DISCORD_LOGO: &str = "logoanimekucli";
+const DISCORD_IMAGE_MAX_LEN: usize = 300;
 fn idlix_audio_path() -> String {
     crate::util::temp_file("animeku_idlix_audio.m3u8")
 }
@@ -441,6 +442,21 @@ fn is_otakudesu_image(url: &str) -> bool {
     url.to_ascii_lowercase().contains("otakudesu")
 }
 
+/// Pad a portrait poster into a square canvas so Discord's square RPC image
+/// box shows the whole poster instead of cropping its top and bottom.
+fn square_discord_poster(image_url: &str) -> String {
+    // wsrv.nl refuses to fetch AniList directly, so route it through
+    // DuckDuckGo's public image proxy first.
+    let duckduckgo_proxy = format!(
+        "https://external-content.duckduckgo.com/iu/?u={}",
+        urlencoding::encode(image_url)
+    );
+    format!(
+        "https://wsrv.nl/?url={}&w=512&h=512&fit=contain&bg=1e1f22&output=jpg",
+        urlencoding::encode(&duckduckgo_proxy)
+    )
+}
+
 /// Resolve a Discord-compatible poster URL. Otakudesu's own image host is
 /// blocked when Discord tries to fetch it, so use AniList's cover CDN instead.
 async fn resolve_discord_poster(thumb_url: Option<String>, movie_title: &str) -> String {
@@ -458,9 +474,16 @@ async fn resolve_discord_poster(thumb_url: Option<String>, movie_title: &str) ->
         lookup_title.as_str()
     };
 
-    fetch_anilist_cover(lookup_title)
-        .await
-        .unwrap_or_else(|| DEFAULT_DISCORD_LOGO.to_string())
+    let Some(cover) = fetch_anilist_cover(lookup_title).await else {
+        return DEFAULT_DISCORD_LOGO.to_string();
+    };
+    let square = square_discord_poster(&cover);
+    if square.len() <= DISCORD_IMAGE_MAX_LEN {
+        square
+    } else {
+        // Discord rejects image URLs longer than 300 characters.
+        cover
+    }
 }
 
 async fn fetch_anilist_cover(title: &str) -> Option<String> {
@@ -1326,11 +1349,42 @@ mod main_tests {
         assert!(!is_otakudesu_image(tmdb));
     }
 
+    #[test]
+    fn test_square_discord_poster() {
+        let square = square_discord_poster(
+            "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx185407-7uzY4fA3hokP.jpg",
+        );
+        assert!(square.starts_with("https://wsrv.nl/?url="));
+        assert!(square.contains("w=512&h=512&fit=contain"));
+        assert!(square.len() <= DISCORD_IMAGE_MAX_LEN);
+    }
+
     #[tokio::test]
-    #[ignore = "requires network access to AniList"]
+    #[ignore = "requires network access to AniList and wsrv.nl"]
     async fn test_anilist_cover_lookup() {
         let cover = fetch_anilist_cover("Takopii no Genzai").await;
         assert!(cover.is_some_and(|url| url.contains("anilist")));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires network access to DuckDuckGo and wsrv.nl"]
+    async fn test_square_poster_is_fetchable() {
+        let cover = fetch_anilist_cover("Takopii no Genzai")
+            .await
+            .expect("AniList cover lookup failed");
+        let square = square_discord_poster(&cover);
+        assert!(square.len() <= DISCORD_IMAGE_MAX_LEN);
+
+        let response = reqwest::get(&square)
+            .await
+            .expect("square poster fetch failed");
+        assert!(response.status().is_success());
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(content_type.starts_with("image/"));
     }
 }
 
