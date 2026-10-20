@@ -21,6 +21,7 @@ pub struct AnimekuCli {
 }
 
 const SEARCH_SEPARATOR: &str = "────────────────────────";
+const EPISODES_PER_PAGE: usize = 25;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SearchAction {
@@ -29,6 +30,16 @@ enum SearchAction {
     Next,
     Separator,
     Select,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EpisodeAction {
+    Back,
+    Search,
+    Previous,
+    Next,
+    Separator,
+    Select(usize),
 }
 
 #[derive(Clone)]
@@ -98,6 +109,83 @@ fn build_search_menu(
     }
 
     items
+}
+
+/// Build one page of the episode picker. Search and page-navigation entries
+/// are selectable so keyboard navigation can reach them without special cases.
+fn build_episode_menu(
+    episodes: &[Episode],
+    page: usize,
+    total_pages: u64,
+) -> (Vec<input::MenuEntry>, Vec<EpisodeAction>) {
+    let total_pages = total_pages.max(1);
+    let page = page.clamp(1, total_pages as usize);
+    let mut entries = Vec::with_capacity(EPISODES_PER_PAGE + 5);
+    let mut actions = Vec::with_capacity(EPISODES_PER_PAGE + 5);
+
+    entries.push(input::MenuEntry::new("[ Kembali ke Pilih Anime ]"));
+    actions.push(EpisodeAction::Back);
+
+    if total_pages > 1 {
+        entries.push(input::MenuEntry::new("[ Cari Episode (semua halaman) ]"));
+        actions.push(EpisodeAction::Search);
+    }
+
+    entries.push(input::MenuEntry::separator(SEARCH_SEPARATOR));
+    actions.push(EpisodeAction::Separator);
+
+    // Keep page navigation above the episode list. With 25 episodes per page
+    // it would otherwise be buried below several screens of entries.
+    let has_previous = page > 1;
+    let has_next = (page as u64) < total_pages;
+    if has_previous {
+        entries.push(input::MenuEntry::new(format!(
+            "Sebelumnya (Halaman {})",
+            page - 1
+        )));
+        actions.push(EpisodeAction::Previous);
+    }
+    if has_next {
+        entries.push(input::MenuEntry::new(format!(
+            "Selanjutnya (Halaman {})",
+            page + 1
+        )));
+        actions.push(EpisodeAction::Next);
+    }
+    if has_previous || has_next {
+        entries.push(input::MenuEntry::separator(SEARCH_SEPARATOR));
+        actions.push(EpisodeAction::Separator);
+    }
+
+    let start = (page - 1) * EPISODES_PER_PAGE;
+    let end = (start + EPISODES_PER_PAGE).min(episodes.len());
+    for (index, episode) in episodes.iter().enumerate().take(end).skip(start) {
+        entries.push(input::MenuEntry::new(episode.title.trim()));
+        actions.push(EpisodeAction::Select(index));
+    }
+
+    (entries, actions)
+}
+
+/// Search across every episode, not just the current page. `select_menu`'s
+/// built-in typing filter makes this the quickest way to jump to episode 900+.
+fn build_episode_search_menu(
+    episodes: &[Episode],
+) -> (Vec<input::MenuEntry>, Vec<EpisodeAction>) {
+    let mut entries = Vec::with_capacity(episodes.len() + 2);
+    let mut actions = Vec::with_capacity(episodes.len() + 2);
+
+    entries.push(input::MenuEntry::new("[ Kembali ke Daftar Episode ]"));
+    actions.push(EpisodeAction::Back);
+    entries.push(input::MenuEntry::separator(SEARCH_SEPARATOR));
+    actions.push(EpisodeAction::Separator);
+
+    for (index, episode) in episodes.iter().enumerate() {
+        entries.push(input::MenuEntry::new(episode.title.trim()));
+        actions.push(EpisodeAction::Select(index));
+    }
+
+    (entries, actions)
 }
 
 impl AnimekuCli {
@@ -260,17 +348,54 @@ impl AnimekuCli {
         }
         println!();
 
-        let mut opts = episodes;
-        opts.push(Episode {
-            id: "0".into(),
-            title: "[ Kembali ke Pilih Anime ]".into(),
-            is_series: false,
-        });
-        let selected = input::choice(opts, true)?;
-        if selected.id == "0" {
-            Ok(None)
-        } else {
-            Ok(Some(selected))
+        let total_pages = episodes.len().div_ceil(EPISODES_PER_PAGE) as u64;
+        let mut page = 1usize;
+
+        loop {
+            let (entries, actions) = build_episode_menu(&episodes, page, total_pages);
+            let default_index = actions
+                .iter()
+                .position(|action| matches!(action, EpisodeAction::Select(_)))
+                .unwrap_or(0);
+            let prompt = if total_pages > 1 {
+                format!("Pilih Episode (Halaman {}/{}):", page, total_pages)
+            } else {
+                "Pilih Episode:".to_string()
+            };
+
+            let Some(selected) = input::select_menu(&prompt, &entries, default_index)? else {
+                return Ok(None);
+            };
+
+            match actions[selected] {
+                EpisodeAction::Back => return Ok(None),
+                EpisodeAction::Previous => {
+                    page = page.saturating_sub(1).max(1);
+                }
+                EpisodeAction::Next => {
+                    page = (page + 1).min(total_pages as usize);
+                }
+                EpisodeAction::Search => {
+                    let (search_entries, search_actions) = build_episode_search_menu(&episodes);
+                    let search_default = search_actions
+                        .iter()
+                        .position(|action| matches!(action, EpisodeAction::Select(_)))
+                        .unwrap_or(0);
+                    let Some(search_selected) = input::select_menu(
+                        "Cari Episode:",
+                        &search_entries,
+                        search_default,
+                    )? else {
+                        continue;
+                    };
+                    match search_actions[search_selected] {
+                        EpisodeAction::Select(index) => return Ok(Some(episodes[index].clone())),
+                        _ => continue,
+                    }
+                }
+                EpisodeAction::Separator => {}
+                EpisodeAction::Select(index) => return Ok(Some(episodes[index].clone())),
+            }
         }
     }
 
@@ -446,6 +571,84 @@ mod tests {
         assert_eq!(
             labels(&menu),
             vec!["[ Kembali ke Pencarian ]", SEARCH_SEPARATOR, "1. Movie a"]
+        );
+    }
+
+    fn episode_list(count: usize) -> Vec<Episode> {
+        (1..=count)
+            .map(|number| Episode {
+                id: number.to_string(),
+                title: format!("Episode {}", number),
+                is_series: true,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn episode_menu_paginates_and_navigates() {
+        let episodes = episode_list(30);
+        let total_pages = episodes.len().div_ceil(EPISODES_PER_PAGE) as u64;
+        assert_eq!(total_pages, 2);
+
+        let (_, first_page) = build_episode_menu(&episodes, 1, total_pages);
+        assert_eq!(first_page[0], EpisodeAction::Back);
+        assert_eq!(first_page[1], EpisodeAction::Search);
+        assert!(first_page.contains(&EpisodeAction::Select(0)));
+        assert!(first_page.contains(&EpisodeAction::Select(24)));
+        assert!(!first_page.contains(&EpisodeAction::Select(25)));
+        assert!(first_page.contains(&EpisodeAction::Next));
+        assert!(!first_page.contains(&EpisodeAction::Previous));
+        assert_eq!(
+            first_page
+                .iter()
+                .filter(|action| matches!(action, EpisodeAction::Select(_)))
+                .count(),
+            EPISODES_PER_PAGE
+        );
+
+        let (_, last_page) = build_episode_menu(&episodes, 2, total_pages);
+        assert!(last_page.contains(&EpisodeAction::Select(25)));
+        assert!(last_page.contains(&EpisodeAction::Select(29)));
+        assert!(!last_page.contains(&EpisodeAction::Select(24)));
+        assert!(last_page.contains(&EpisodeAction::Previous));
+        assert!(!last_page.contains(&EpisodeAction::Next));
+        assert_eq!(
+            last_page
+                .iter()
+                .filter(|action| matches!(action, EpisodeAction::Select(_)))
+                .count(),
+            5
+        );
+    }
+
+    #[test]
+    fn single_page_episode_menu_has_no_search_or_navigation() {
+        let (_, actions) = build_episode_menu(&episode_list(5), 1, 1);
+        assert!(!actions.contains(&EpisodeAction::Search));
+        assert!(!actions.contains(&EpisodeAction::Previous));
+        assert!(!actions.contains(&EpisodeAction::Next));
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| matches!(action, EpisodeAction::Select(_)))
+                .count(),
+            5
+        );
+    }
+
+    #[test]
+    fn episode_search_menu_contains_every_episode() {
+        let episodes = episode_list(30);
+        let (_, actions) = build_episode_search_menu(&episodes);
+        assert_eq!(actions[0], EpisodeAction::Back);
+        assert!(actions.contains(&EpisodeAction::Select(0)));
+        assert!(actions.contains(&EpisodeAction::Select(29)));
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| matches!(action, EpisodeAction::Select(_)))
+                .count(),
+            30
         );
     }
 }

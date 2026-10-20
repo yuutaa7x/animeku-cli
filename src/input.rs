@@ -310,6 +310,36 @@ fn step_selectable(
     current
 }
 
+/// Move the selection by up to `steps` selectable entries without wrapping.
+/// Page keys should stop at the first/last item instead of cycling the list.
+fn jump_selectable(
+    entries: &[MenuEntry],
+    visible: &[usize],
+    current: usize,
+    forward: bool,
+    steps: usize,
+) -> usize {
+    let selectable = visible
+        .iter()
+        .copied()
+        .filter(|&index| entries[index].selectable)
+        .collect::<Vec<_>>();
+    if selectable.is_empty() {
+        return current;
+    }
+
+    let position = selectable
+        .iter()
+        .position(|&index| index == current)
+        .unwrap_or(0);
+    let target = if forward {
+        (position + steps).min(selectable.len() - 1)
+    } else {
+        position.saturating_sub(steps)
+    };
+    selectable[target]
+}
+
 fn fit_line(text: &str, width: usize) -> String {
     truncate_str(text, width.max(1), "…").into_owned()
 }
@@ -438,6 +468,26 @@ fn run_select_menu(
                     selected = Some(step_selectable(entries, &visible, current, true));
                 }
             }
+            Key::PageUp => {
+                if let Some(current) = selected {
+                    selected = Some(jump_selectable(entries, &visible, current, false, 10));
+                }
+            }
+            Key::PageDown => {
+                if let Some(current) = selected {
+                    selected = Some(jump_selectable(entries, &visible, current, true, 10));
+                }
+            }
+            Key::Home => {
+                selected = first_selectable(entries, &visible);
+            }
+            Key::End => {
+                selected = visible
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|&index| entries[index].selectable);
+            }
             Key::Backspace => {
                 if !filter.is_empty() {
                     filter.pop();
@@ -502,6 +552,17 @@ mod tests {
         assert_eq!(visible_entries(&entries, "takopii"), vec![2]);
         assert_eq!(visible_entries(&entries, "halaman 2"), vec![4]);
         assert!(visible_entries(&entries, "tidak-ada").is_empty());
+    }
+
+    #[test]
+    fn page_jumps_clamp_without_wrapping() {
+        let entries = entries();
+        let visible = visible_entries(&entries, "");
+
+        assert_eq!(jump_selectable(&entries, &visible, 0, true, 10), 4);
+        assert_eq!(jump_selectable(&entries, &visible, 4, false, 10), 0);
+        assert_eq!(jump_selectable(&entries, &visible, 2, true, 1), 4);
+        assert_eq!(jump_selectable(&entries, &visible, 2, false, 1), 0);
     }
 
     #[test]
