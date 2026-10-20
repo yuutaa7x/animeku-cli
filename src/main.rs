@@ -571,8 +571,18 @@ fn reset_discord_status(discord: &mut Option<DiscordIpcClient>) {
     }
 }
 
-async fn execute_player(stream_url: &str, provider_type: usize, start_seconds: u64) -> anyhow::Result<u64> {
-    println!("{} Membuka tautan diaplikasi eksternal .. ", "◆".blue());
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaybackOutcome {
+    Played { position: u64, offer_next: bool },
+    Cancelled,
+}
+
+async fn execute_player(
+    stream_url: &str,
+    provider_type: usize,
+    start_seconds: u64,
+) -> anyhow::Result<PlaybackOutcome> {
+    println!("{} Membuka tautan di aplikasi eksternal .. ", "◆".blue());
     stdout().flush()?;
 
     let is_android = std::env::var("TERMUX_VERSION").is_ok();
@@ -600,6 +610,8 @@ async fn execute_player(stream_url: &str, provider_type: usize, start_seconds: u
     };
 
     let mut final_pos = start_seconds;
+    let mut played = false;
+    let mut offer_next = true;
 
     match choice_normalized {
         0 => {
@@ -682,19 +694,29 @@ mp.register_event("shutdown", save)
                 // which fails with 403 on these signed URLs.
                 cmd.arg("--ytdl=no");
             }
-            if let Ok(status) = cmd.arg(stream_url).status() {
-                if !status.success() {
-                    eprintln!("{} Gagal memutar video di MPV. Tekan Enter untuk kembali...", "■".red());
-                    let mut dummy = String::new();
-                    let _ = std::io::stdin().read_line(&mut dummy);
+            match cmd.arg(stream_url).status() {
+                Ok(status) => {
+                    played = true;
+                    if !status.success() {
+                        eprintln!(
+                            "{} MPV keluar dengan status tidak normal. Tekan Enter untuk kembali...",
+                            "■".red()
+                        );
+                        let mut dummy = String::new();
+                        let _ = std::io::stdin().read_line(&mut dummy);
+                    }
                 }
-            } else {
-                eprintln!("{} MPV tidak ditemukan!", "■".red());
+                Err(_) => {
+                    eprintln!("{} MPV tidak ditemukan!", "■".red());
+                }
             }
 
             if let Ok(saved) = std::fs::read_to_string(&last_pos_file) {
                 if let Ok(pos) = saved.trim().parse::<u64>() {
                     final_pos = pos;
+                    // The tracking script wrote a position, so playback really
+                    // started even if mpv later reported a non-zero exit code.
+                    played = true;
                 }
             }
             let _ = std::fs::remove_file(&last_pos_file);
@@ -718,7 +740,7 @@ mp.register_event("shutdown", save)
                     Err(e) => {
                         eprintln!("{} Gagal menjalankan proxy lokal: {}", "■".red(), e);
                         std::thread::sleep(std::time::Duration::from_secs(3));
-                        return Ok(final_pos);
+                        return Ok(PlaybackOutcome::Cancelled);
                     }
                 };
                 let proxy_port = proxy.port;
@@ -737,7 +759,8 @@ mp.register_event("shutdown", save)
                     eprintln!("{} Gagal memanggil termux-open. Pastikan VLC sudah di-install.", "■".red());
                     std::thread::sleep(std::time::Duration::from_secs(3));
                 } else {
-                    println!("Proxy berjalan di port {}. Silahkan tonton di aplikasi pilihanmu!", proxy_port);
+                    played = true;
+                    println!("Proxy berjalan di port {}. Silakan tonton di aplikasi pilihanmu!", proxy_port);
                     println!("\n{} Jangan tutup layar ini selama menonton agar proxy tetap hidup.", "ℹ".yellow());
                     println!("Jika sudah selesai menonton, tekan Enter untuk kembali...");
                     let mut dummy = String::new();
@@ -764,36 +787,58 @@ mp.register_event("shutdown", save)
                     cmd.arg(format!("--http-referrer={}", OTAKUDESU_REFERER));
                     cmd.arg(format!("--http-user-agent={}", OTAKUDESU_USER_AGENT));
                 }
-                if let Ok(status) = cmd.arg(stream_url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status() {
-                    if !status.success() { eprintln!("{} Gagal memutar video di VLC", "■".red()); }
-                } else { eprintln!("{} VLC tidak ditemukan!", "■".red()); }
-                
-                print!("Simpan posisi terakhir tontonan (dalam menit)? (Kosongkan jika sudah tamat): ");
-                stdout().flush().unwrap_or(());
-                let mut pos_input = String::new();
-                let _ = std::io::stdin().read_line(&mut pos_input);
-                if let Ok(m) = pos_input.trim().parse::<u64>() {
-                    final_pos = m * 60;
-                } else if pos_input.trim().is_empty() {
-                    final_pos = 0;
+                match cmd.arg(stream_url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status() {
+                    Ok(status) => {
+                        played = true;
+                        if !status.success() {
+                            eprintln!("{} VLC keluar dengan status tidak normal.", "■".red());
+                        }
+                    }
+                    Err(_) => eprintln!("{} VLC tidak ditemukan!", "■".red()),
+                }
+
+                if played {
+                    println!();
+                    print!("Simpan posisi terakhir tontonan (dalam menit)? (Kosongkan jika sudah tamat): ");
+                    stdout().flush().unwrap_or(());
+                    let mut pos_input = String::new();
+                    let _ = std::io::stdin().read_line(&mut pos_input);
+                    if let Ok(m) = pos_input.trim().parse::<u64>() {
+                        final_pos = m * 60;
+                    } else if pos_input.trim().is_empty() {
+                        final_pos = 0;
+                    }
                 }
             }
         },
         2 => {
-            if open::that(stream_url).is_ok() {
-                if dialoguer::Confirm::with_theme(&crate::util::custom_theme())
-                    .with_prompt("Tutup aplikasi?")
-                    .interact()?
-                {
-                    std::process::exit(0);
+            match open::that(stream_url) {
+                Ok(()) => {
+                    played = true;
+                    // Browser playback is external and untracked, so don't
+                    // push the user into the auto-next prompt afterwards.
+                    offer_next = false;
+                    println!("\n{} Tautan dibuka di browser.", "✓".green());
+                    println!("Tekan Enter setelah selesai menonton untuk kembali...");
+                    let mut dummy = String::new();
+                    let _ = std::io::stdin().read_line(&mut dummy);
                 }
-            } else {
-                println!("gagal membuka browser");
+                Err(e) => {
+                    eprintln!("{} Gagal membuka browser: {}", "■".red(), e);
+                }
             }
         },
         _ => {},
     }
-    Ok(final_pos)
+
+    if played {
+        Ok(PlaybackOutcome::Played {
+            position: final_pos,
+            offer_next,
+        })
+    } else {
+        Ok(PlaybackOutcome::Cancelled)
+    }
 }
 
 /// Best-effort season detection for a concrete episode. Provider titles like
@@ -821,6 +866,65 @@ fn detect_season_for_episode(
     detect_season(&movie.title, &thumb, &meta_data).unwrap_or(1)
 }
 
+enum EpisodePlayback {
+    Played { offer_next: bool },
+    PlayerCancelled,
+    StreamCancelled,
+}
+
+/// Play one episode and persist its progress. Returning a distinct result for
+/// "player cancelled" and "stream picker cancelled" lets the caller reopen the
+/// right screen instead of treating a cancelled playback as finished.
+async fn play_episode(
+    animeku: &mut AnimekuCli,
+    movie: &crate::models::Movie,
+    episode: &crate::models::Episode,
+    provider_type: usize,
+    start_seconds: u64,
+    discord: &mut Option<DiscordIpcClient>,
+) -> anyhow::Result<EpisodePlayback> {
+    clearscreen_and_show_banner()?;
+
+    let season_num = detect_season_for_episode(animeku, movie, episode);
+    let thumb_url = animeku.get_meta(&movie.id).and_then(|m| m.thumb_url);
+
+    update_discord_status(
+        discord,
+        &movie.title,
+        &episode.title,
+        episode.is_series,
+        season_num,
+        thumb_url,
+    )
+    .await;
+
+    let stream_opt = animeku.extract_stream_urls(episode.clone()).await?;
+    let Some(stream) = stream_opt else {
+        reset_discord_status(discord);
+        return Ok(EpisodePlayback::StreamCancelled);
+    };
+
+    let outcome = execute_player(&stream.url, provider_type, start_seconds).await?;
+    reset_discord_status(discord);
+
+    match outcome {
+        PlaybackOutcome::Cancelled => Ok(EpisodePlayback::PlayerCancelled),
+        PlaybackOutcome::Played {
+            position,
+            offer_next,
+        } => {
+            input::save_watch_entry(&crate::models::WatchEntry {
+                movie: movie.clone(),
+                episode: episode.clone(),
+                provider_type,
+                position_seconds: position,
+                updated_at: 0,
+            });
+            Ok(EpisodePlayback::Played { offer_next })
+        }
+    }
+}
+
 async fn handle_movie_episodes(
     animeku: &mut AnimekuCli,
     movie: &crate::models::Movie,
@@ -838,72 +942,50 @@ async fn handle_movie_episodes(
         let single_movie = !episode.is_series;
 
         loop {
-            let season_num = detect_season_for_episode(animeku, movie, &episode);
-
-            // Stream selection & playback
-            clearscreen_and_show_banner()?;
-            let meta_opt = animeku.get_meta(&movie.id);
-            let thumb_url = meta_opt.and_then(|m| m.thumb_url);
-            
-            update_discord_status(
-                discord,
-                &movie.title,
-                &episode.title,
-                episode.is_series,
-                season_num,
-                thumb_url,
-            )
-            .await;
-
-            let stream_opt = animeku.extract_stream_urls(episode.clone()).await?;
-            if let Some(stream) = stream_opt {
-                let last_pos = execute_player(&stream.url, provider_type, 0).await?;
-                input::save_watch_entry(&crate::models::WatchEntry {
-                    movie: movie.clone(),
-                    episode: episode.clone(),
-                    provider_type,
-                    position_seconds: last_pos,
-                    updated_at: 0,
-                });
-            } else {
-                reset_discord_status(discord);
-                if single_movie {
-                    break 'movie_list;
+            match play_episode(animeku, movie, &episode, provider_type, 0, discord).await? {
+                EpisodePlayback::PlayerCancelled => continue,
+                EpisodePlayback::StreamCancelled => {
+                    if single_movie {
+                        break 'movie_list;
+                    }
+                    break;
                 }
-                break;
-            }
-            
-            reset_discord_status(discord);
+                EpisodePlayback::Played { offer_next } => {
+                    if offer_next {
+                        // Auto-next logic: follow the provider's ordered episode
+                        // list so the last episode of a season advances to the
+                        // next season.
+                        let next_ep_opt = animeku
+                            .get_episode_list(&movie.id)
+                            .and_then(|episodes| find_next_episode(&episodes, &episode).cloned());
 
-            // Auto-next logic: follow the provider's ordered episode list so
-            // the last episode of a season advances to the next season.
-            let next_ep_opt = animeku
-                .get_episode_list(&movie.id)
-                .and_then(|episodes| find_next_episode(&episodes, &episode).cloned());
+                        if let Some(next_ep) = next_ep_opt {
+                            let confirm =
+                                dialoguer::Confirm::with_theme(&crate::util::custom_theme())
+                                    .with_prompt(format!("Lanjut ke {}?", next_ep.title.trim()))
+                                    .default(true)
+                                    // `default(true)` membuat dialoguer menampilkan
+                                    // kata "yes" sebagai hint sebelum user menjawab.
+                                    // Sembunyikan hint itu, tapi Enter tetap "ya".
+                                    .show_default(false)
+                                    .interact()?;
 
-            if let Some(next_ep) = next_ep_opt {
-                let confirm = dialoguer::Confirm::with_theme(&crate::util::custom_theme())
-                    .with_prompt(format!("Lanjut ke {}?", next_ep.title.trim()))
-                    .default(true)
-                    // `default(true)` membuat dialoguer menampilkan kata "yes"
-                    // sebagai hint sebelum user menjawab. Sembunyikan hint itu,
-                    // tapi Enter tetap berarti "ya".
-                    .show_default(false)
-                    .interact()?;
-                
-                if confirm {
-                    episode = next_ep;
-                    continue; // Loop play again with next episode
+                            if confirm {
+                                episode = next_ep;
+                                continue;
+                            }
+                        }
+                    }
+
+                    // A finished full movie has no episode list to return to.
+                    if single_movie {
+                        break 'movie_list;
+                    }
+
+                    // No next episode / user declined / browser playback.
+                    break;
                 }
             }
-            
-            // A finished full movie has no episode list to return to.
-            if single_movie {
-                break 'movie_list;
-            }
-
-            // If no next episode, or user declined, break back to episode selection
-            break;
         }
     }
     Ok(())
@@ -1189,14 +1271,17 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
 
             let stream_opt = animeku.extract_stream_urls(selected_watch.episode.clone()).await?;
             if let Some(stream) = stream_opt {
-                let final_pos = execute_player(&stream.url, selected_watch.provider_type, start_seconds).await?;
-                input::save_watch_entry(&crate::models::WatchEntry {
-                    movie: selected_watch.movie.clone(),
-                    episode: selected_watch.episode.clone(),
-                    provider_type: selected_watch.provider_type,
-                    position_seconds: final_pos,
-                    updated_at: 0,
-                });
+                let outcome =
+                    execute_player(&stream.url, selected_watch.provider_type, start_seconds).await?;
+                if let PlaybackOutcome::Played { position, .. } = outcome {
+                    input::save_watch_entry(&crate::models::WatchEntry {
+                        movie: selected_watch.movie.clone(),
+                        episode: selected_watch.episode.clone(),
+                        provider_type: selected_watch.provider_type,
+                        position_seconds: position,
+                        updated_at: 0,
+                    });
+                }
             }
             reset_discord_status(discord);
 
