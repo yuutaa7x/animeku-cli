@@ -1073,16 +1073,21 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
                 1
             };
 
+            let mut animeku = AnimekuCli::new(get_ext_by_provider(selected_watch.provider_type));
+            let thumb_url = animeku
+                .ensure_meta(&selected_watch.movie)
+                .await
+                .and_then(|meta| meta.thumb_url);
+
             update_discord_status(
                 discord,
                 &display_title,
                 &display_episode,
                 selected_watch.episode.is_series,
                 season_num,
-                None,
+                thumb_url,
             );
 
-            let mut animeku = AnimekuCli::new(get_ext_by_provider(selected_watch.provider_type));
             let stream_opt = animeku.extract_stream_urls(selected_watch.episode.clone()).await?;
             if let Some(stream) = stream_opt {
                 let final_pos = execute_player(&stream.url, selected_watch.provider_type, start_seconds).await?;

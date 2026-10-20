@@ -105,6 +105,17 @@ impl AnimekuCli {
         self.episode_cache.get(id).map(|(_, m)| m.clone())
     }
 
+    /// Load and cache movie metadata without showing the episode picker.
+    /// Used when resuming from history, where only the stored IDs are available.
+    pub async fn ensure_meta(&mut self, movie: &Movie) -> Option<Meta> {
+        if !self.episode_cache.contains_key(&movie.id) {
+            let episodes_and_meta = self.extractor.get_episodes(movie.clone()).await.ok()?;
+            self.episode_cache
+                .insert(movie.id.clone(), episodes_and_meta);
+        }
+        self.get_meta(&movie.id)
+    }
+
     pub fn get_episode_list(&self, id: &str) -> Option<Vec<Episode>> {
         self.episode_cache.get(id).map(|(e, _)| e.clone())
     }
@@ -308,6 +319,57 @@ impl AnimekuCli {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    struct StubExt {
+        meta_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ext::Ext for StubExt {
+        async fn search(
+            &mut self,
+            _title: String,
+            _page: usize,
+        ) -> anyhow::Result<(Vec<Movie>, u64)> {
+            Ok((Vec::new(), 1))
+        }
+
+        async fn get_episodes(&self, movie: Movie) -> anyhow::Result<(Vec<Episode>, Meta)> {
+            self.meta_calls.fetch_add(1, Ordering::SeqCst);
+            Ok((
+                Vec::new(),
+                Meta {
+                    thumb_url: Some(format!("https://example.com/{}.jpg", movie.id)),
+                    data: Vec::new(),
+                },
+            ))
+        }
+
+        async fn get_stream_urls(&self, _episode: Episode) -> anyhow::Result<Vec<Stream>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_meta_loads_once_and_caches() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut cli = AnimekuCli::new(Box::new(StubExt {
+            meta_calls: calls.clone(),
+        }));
+        let movie = movie("cached");
+
+        let first = cli.ensure_meta(&movie).await;
+        let second = cli.ensure_meta(&movie).await;
+
+        let expected = Some("https://example.com/cached.jpg");
+        assert_eq!(first.and_then(|meta| meta.thumb_url).as_deref(), expected);
+        assert_eq!(second.and_then(|meta| meta.thumb_url).as_deref(), expected);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
 
     fn movie(id: &str) -> Movie {
         Movie {
