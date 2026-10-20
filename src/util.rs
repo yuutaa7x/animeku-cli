@@ -1,8 +1,78 @@
+use std::collections::HashMap;
+use std::future::Future;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, OnceLock,
+};
 
 use colored::Colorize;
 use dialoguer::{console::Style, theme::ColorfulTheme};
+
+/// Tiny dependency-free loading spinner. It writes to stderr and disables
+/// itself automatically when output is redirected.
+pub struct Spinner {
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Spinner {
+    pub fn start(message: impl Into<String>) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        if !std::io::stderr().is_terminal() {
+            return Self { stop, handle: None };
+        }
+
+        let message = message.into();
+        let clear_width = message.chars().count() + 3;
+        let stop_flag = stop.clone();
+        let handle = std::thread::spawn(move || {
+            let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let mut index = 0usize;
+            while !stop_flag.load(Ordering::Relaxed) {
+                eprint!("\r{} {}", frames[index % frames.len()], message);
+                let _ = std::io::stderr().flush();
+                index += 1;
+                std::thread::sleep(std::time::Duration::from_millis(90));
+            }
+            eprint!("\r{}\r", " ".repeat(clear_width));
+            let _ = std::io::stderr().flush();
+        });
+
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn finish(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+
+    pub fn stop(mut self) {
+        self.finish();
+    }
+}
+
+impl Drop for Spinner {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+pub async fn with_spinner<F, T>(message: impl Into<String>, future: F) -> T
+where
+    F: Future<Output = T>,
+{
+    let spinner = Spinner::start(message);
+    let result = future.await;
+    spinner.stop();
+    result
+}
 
 pub fn custom_theme() -> ColorfulTheme {
     ColorfulTheme {
@@ -116,33 +186,76 @@ macro_rules! regex {
 }
 
 pub async fn show_image_thumb(url: String) {
-    let client = Client::new();
-    if let Ok(resp) = client.get(url).send().await {
-        if let Ok(bytes) = resp.bytes().await {
-            if let Ok(img) = image::load_from_memory(&bytes) {
-                let conf = viuer::Config {
-                    transparent: true,
-                    width: Some(50),
-                    height: Some(30),
-                    y: 8,
-                    x: 2,
-                    ..Default::default()
-                };
-                if viuer::print(&img, &conf).is_ok() {
-                    println!();
-                }
+    static POSTER_CACHE: OnceLock<Mutex<HashMap<String, Arc<image::DynamicImage>>>> =
+        OnceLock::new();
+
+    let cache = POSTER_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cached = cache
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&url).cloned());
+
+    let image = match cached {
+        Some(image) => image,
+        None => {
+            let client = Client::builder()
+                .timeout(std::time::Duration::from_secs(8))
+                .user_agent("animeku-cli/0.2.0")
+                .build()
+                .unwrap_or_else(|_| Client::new());
+            let Ok(resp) = client.get(&url).send().await else {
+                return;
+            };
+            let Ok(bytes) = resp.bytes().await else {
+                return;
+            };
+            let Ok(image) = image::load_from_memory(&bytes) else {
+                return;
+            };
+            let image = Arc::new(image);
+            if let Ok(mut cache) = cache.lock() {
+                cache.insert(url, image.clone());
             }
+            image
         }
+    };
+
+    let (rows, columns) = crossterm::terminal::size().unwrap_or((40, 120));
+    let width = ((columns as u32 * 35) / 100).clamp(30, 60);
+    let height = ((rows as u32 * 45) / 100).clamp(15, 35);
+    let conf = viuer::Config {
+        transparent: true,
+        width: Some(width),
+        height: Some(height),
+        y: 8,
+        x: 2,
+        ..Default::default()
+    };
+    if viuer::print(&image, &conf).is_ok() {
+        println!();
     }
 }
 
 pub fn clearscreen_and_show_banner() -> anyhow::Result<()> {
     clearscreen::clear()?;
 
+    let config = crate::config::Config::load();
+    let short_terminal = crossterm::terminal::size()
+        .map(|(_, rows)| rows < 22)
+        .unwrap_or(false);
+
+    if config.compact_banner || short_terminal {
+        eprintln!(
+            "  {} v{}  •  Fork by Yuutaa7x\n",
+            "Animeku-CLI".bright_green().bold(),
+            env!("CARGO_PKG_VERSION")
+        );
+        return Ok(());
+    }
+
     let version = format!(
-        "                     v{} {} val - Forked by Yuutaa7x",
-        env!("CARGO_PKG_VERSION"),
-        "©".cyan()
+        "                     v{}  •  Fork by Yuutaa7x",
+        env!("CARGO_PKG_VERSION")
     );
     eprintln!(
         "{}

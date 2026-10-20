@@ -41,6 +41,9 @@ pub struct WatchEntry {
     pub episode: Episode,
     pub provider_type: usize,
     pub position_seconds: u64,
+    /// True when the player reported that the episode was watched to the end.
+    #[serde(default)]
+    pub completed: bool,
     /// Unix timestamp (seconds) of when this entry was last updated.
     pub updated_at: u64,
 }
@@ -48,6 +51,40 @@ pub struct WatchEntry {
 impl WatchEntry {
     pub fn format_duration(&self) -> String {
         format_seconds(self.position_seconds)
+    }
+
+    pub fn status_label(&self) -> String {
+        if self.completed {
+            "✓ Tamat".to_string()
+        } else if self.position_seconds == 0 {
+            "▶ Belum dimulai".to_string()
+        } else {
+            format!("▶ {}", self.format_duration())
+        }
+    }
+
+    pub fn format_updated(&self) -> String {
+        format_relative_time(self.updated_at)
+    }
+}
+
+/// Human-friendly relative timestamp. Kept dependency-free because the only
+/// precision needed by the history screen is minutes/hours/days.
+pub fn format_relative_time(updated_at: u64) -> String {
+    if updated_at == 0 {
+        return "waktu tidak diketahui".to_string();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let diff = now.saturating_sub(updated_at);
+    match diff {
+        0..=59 => "baru saja".to_string(),
+        60..=3599 => format!("{} menit lalu", diff / 60),
+        3600..=86_399 => format!("{} jam lalu", diff / 3600),
+        86_400..=604_799 => format!("{} hari lalu", diff / 86_400),
+        _ => format!("{} minggu lalu", diff / 604_800),
     }
 }
 
@@ -192,6 +229,7 @@ mod tests {
             },
             provider_type: 1,
             position_seconds: 754,
+            completed: false,
             updated_at: 0,
         };
         assert_eq!(lw.format_duration(), "12:34");

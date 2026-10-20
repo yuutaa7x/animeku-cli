@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 
 use dialoguer::console::{style, truncate_str, Key, Term};
@@ -42,6 +43,129 @@ pub fn save_history(title: &str) {
     let _ = fs::write(path, new_content);
 }
 
+pub fn clear_search_history() {
+    let Some(home) = dirs::home_dir() else { return; };
+    let path = home.join(".animeku_history");
+    let _ = fs::write(path, String::new());
+    clear_search_providers();
+}
+
+// ─── Search provider cache ───────────────────────────────────────────────────
+//
+// The old search history is a plain newline file. Keeping provider choices in
+// a sidecar JSON map lets existing history files keep working while letting a
+// selected title reopen with the same provider next time.
+
+const SEARCH_PROVIDER_FILE: &str = ".animeku_search_providers.json";
+
+fn search_providers_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|home| home.join(SEARCH_PROVIDER_FILE))
+}
+
+fn load_search_providers() -> HashMap<String, usize> {
+    let Some(path) = search_providers_path() else {
+        return HashMap::new();
+    };
+    let Ok(content) = fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+fn write_search_providers(providers: &HashMap<String, usize>) {
+    let Some(path) = search_providers_path() else {
+        return;
+    };
+    if let Ok(content) = serde_json::to_string_pretty(providers) {
+        let _ = fs::write(path, content);
+    }
+}
+
+pub fn save_search_provider(title: &str, provider: usize) {
+    let mut providers = load_search_providers();
+    providers.insert(title.trim().to_lowercase(), provider);
+    write_search_providers(&providers);
+}
+
+pub fn load_search_provider(title: &str) -> Option<usize> {
+    load_search_providers()
+        .get(&title.trim().to_lowercase())
+        .copied()
+}
+
+pub fn delete_search_provider(title: &str) {
+    let mut providers = load_search_providers();
+    providers.remove(&title.trim().to_lowercase());
+    write_search_providers(&providers);
+}
+
+pub fn clear_search_providers() {
+    let Some(path) = search_providers_path() else {
+        return;
+    };
+    let _ = fs::write(path, "{}");
+}
+
+// ─── AniList detection cache ─────────────────────────────────────────────────
+
+const PROVIDER_DETECTION_FILE: &str = ".animeku_provider_detection.json";
+
+fn provider_detection_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|home| home.join(PROVIDER_DETECTION_FILE))
+}
+
+fn load_provider_detections() -> HashMap<String, bool> {
+    let Some(path) = provider_detection_path() else {
+        return HashMap::new();
+    };
+    let Ok(content) = fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+pub fn load_provider_detection(title: &str) -> Option<bool> {
+    load_provider_detections()
+        .get(&title.trim().to_lowercase())
+        .copied()
+}
+
+pub fn save_provider_detection(title: &str, is_anime: bool) {
+    let mut detections = load_provider_detections();
+    detections.insert(title.trim().to_lowercase(), is_anime);
+    let Some(path) = provider_detection_path() else {
+        return;
+    };
+    if let Ok(content) = serde_json::to_string_pretty(&detections) {
+        let _ = fs::write(path, content);
+    }
+}
+
+pub fn clear_provider_detections() {
+    let Some(path) = provider_detection_path() else {
+        return;
+    };
+    let _ = fs::write(path, "{}");
+}
+
+/// Force the provider menu, bypassing config/cache. Used by the history
+/// screen's "Ganti Provider" action.
+pub async fn choose_provider_manually() -> anyhow::Result<Option<usize>> {
+    let labels = ["Idlix (Anime & Movies)", "Otakudesu (Anime)", "Kembali"];
+    let entries = labels
+        .iter()
+        .map(|label| MenuEntry::new(*label))
+        .collect::<Vec<_>>();
+    let Some(choice) = select_menu_simple("Pilih Provider:", &entries, 0)? else {
+        return Ok(None);
+    };
+    match choice {
+        0 => Ok(Some(0)),
+        1 => Ok(Some(1)),
+        _ => Ok(None),
+    }
+}
+
 /// Remove a single title from the search history file.
 pub fn delete_search_history_entry(title: &str) {
     let Some(home) = dirs::home_dir() else { return; };
@@ -55,6 +179,7 @@ pub fn delete_search_history_entry(title: &str) {
         history.join("\n") + "\n"
     };
     let _ = fs::write(path, new_content);
+    delete_search_provider(title);
 }
 
 // ─── Watch History ────────────────────────────────────────────────────────────
@@ -111,6 +236,14 @@ pub fn save_watch_entry(entry: &WatchEntry) {
     }
 }
 
+pub fn clear_watch_history() {
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let path = home.join(WATCH_HISTORY_FILE);
+    let _ = fs::write(path, "[]");
+}
+
 /// Remove the entry at `index` from the watch history.
 pub fn delete_watch_entry(index: usize) {
     let Some(home) = dirs::home_dir() else {
@@ -134,16 +267,31 @@ pub fn delete_watch_entry(index: usize) {
 /// Tanya jenis konten → tentukan provider.
 /// Movie / Series → Idlix otomatis.
 /// Anime → pilih Idlix atau Otakudesu.
-pub async fn pick_provider(title: &str, is_from_suggestion: bool) -> anyhow::Result<usize> {
-    use std::io::Write;
+pub async fn pick_provider(
+    title: &str,
+    is_from_suggestion: bool,
+) -> anyhow::Result<Option<usize>> {
     use crossterm::style::Stylize;
-    
+    use std::io::Write;
+
+    if let Some(provider) = crate::provider_override() {
+        return Ok(Some(provider));
+    }
+
+    match crate::config::Config::load().provider {
+        crate::config::ProviderPreference::Idlix => return Ok(Some(0)),
+        crate::config::ProviderPreference::Otakudesu => return Ok(Some(1)),
+        crate::config::ProviderPreference::Auto => {}
+    }
+
     print!("{} Mendeteksi jenis konten... ", "◆".blue());
     std::io::stdout().flush().unwrap();
 
-    let mut is_anime = is_from_suggestion;
+    let cached_detection = load_provider_detection(title);
+    let mut is_anime = is_from_suggestion || cached_detection.unwrap_or(false);
+    let mut detection_completed = false;
 
-    if !is_anime {
+    if !is_anime && cached_detection.is_none() {
         let query_payload = serde_json::json!({
             "query": "query ($search: String) { Media(search: $search, type: ANIME, sort: POPULARITY_DESC) { title { romaji english } } }",
             "variables": { "search": title }
@@ -154,6 +302,7 @@ pub async fn pick_provider(title: &str, is_from_suggestion: bool) -> anyhow::Res
                 if res.status().is_success() {
                     if let Ok(json) = res.json::<serde_json::Value>().await {
                         if let Some(media) = json.pointer("/data/Media") {
+                            detection_completed = true;
                             let romaji = media.pointer("/title/romaji").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
                             let english = media.pointer("/title/english").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
                             let t = title.to_lowercase();
@@ -168,22 +317,49 @@ pub async fn pick_provider(title: &str, is_from_suggestion: bool) -> anyhow::Res
         }
     }
 
+    if detection_completed {
+        save_provider_detection(title, is_anime);
+    }
+
     if is_anime {
-        println!("\r{} Terdeteksi sebagai: {}                     ", "✓".green(), "Anime".cyan());
-        let provider = dialoguer::Select::with_theme(&crate::util::custom_theme())
-            .with_prompt("Pilih Provider")
-            .items(&["Idlix (Anime & Movies)", "Otakudesu (Anime)"])
-            .default(0)
-            .interact()?;
-        Ok(provider)
+        println!(
+            "\r{} Terdeteksi sebagai: {}                     ",
+            "✓".green(),
+            "Anime".cyan()
+        );
+        let labels = ["Idlix (Anime & Movies)", "Otakudesu (Anime)", "Kembali"];
+        let entries = labels
+            .iter()
+            .map(|label| MenuEntry::new(*label))
+            .collect::<Vec<_>>();
+        let Some(choice) = select_menu_simple("Pilih Provider:", &entries, 0)? else {
+            return Ok(None);
+        };
+        match choice {
+            0 => Ok(Some(0)),
+            1 => Ok(Some(1)),
+            _ => Ok(None),
+        }
     } else {
-        println!("\r{} Terdeteksi sebagai: {}                     ", "✓".green(), "Movie/Series (Non-Anime)".yellow());
+        if !detection_completed && cached_detection.is_none() && !is_from_suggestion {
+            println!(
+                "\r{} Deteksi tidak tersedia; memakai {} ...",
+                "⚠".yellow(),
+                "Idlix".cyan()
+            );
+        } else {
+            println!(
+                "\r{} Terdeteksi sebagai: {}                     ",
+                "✓".green(),
+                "Movie/Series (Non-Anime)".yellow()
+            );
+        }
         // Default to Idlix for movies/series
-        Ok(0)
+        Ok(Some(0))
     }
 }
 
-// ─── User input with history FuzzySelect ─────────────────────────────────────
+// ─── User input with history menu ────────────────────────────────────────────
 
 const NEW_SEARCH_LABEL: &str = "[ Cari judul baru... ]";
 
@@ -192,66 +368,93 @@ const NEW_SEARCH_LABEL: &str = "[ Cari judul baru... ]";
 pub async fn get_user_input() -> anyhow::Result<Option<Input>> {
     let history = load_history();
 
-    // Build items: first option is always "new search", rest are history.
-    // A custom menu is used here so q + Enter can return instead of being
-    // swallowed as a FuzzySelect filter character.
-    let mut entries = Vec::with_capacity(history.len() + 1);
-    entries.push(MenuEntry::new(NEW_SEARCH_LABEL));
-    entries.extend(history.iter().cloned().map(MenuEntry::new));
+    loop {
+        // Build items: first option is always "new search", rest are history.
+        // A custom menu is used here so q + Enter can return instead of being
+        // swallowed by a filter input.
+        let mut entries = Vec::with_capacity(history.len() + 1);
+        entries.push(MenuEntry::new(NEW_SEARCH_LABEL));
+        entries.extend(history.iter().cloned().map(MenuEntry::new));
 
-    let selection = select_menu_q_back(
-        "Cari anime/movie (q untuk kembali, ketik untuk filter histori):",
-        &entries,
-        0,
-    )?;
+        let selection = select_menu_q_back(
+            "Cari anime / film (q+Enter kembali, ketik untuk filter riwayat):",
+            &entries,
+            0,
+        )?;
 
-    let (title, is_sugg) = match selection {
-        // User pressed Escape / q
-        None => return Ok(None),
-        Some(0) => {
-            // "New search" selected → use custom live async autocomplete!
-            let res = crate::live_input::get_live_input("Masukan judul anime/movie").await?;
-            let (raw, is_s) = res.unwrap_or_default();
-            if raw.trim().eq_ignore_ascii_case("q") || raw.trim().is_empty() {
-                return Ok(None);
+        let (title, is_sugg) = match selection {
+            // User pressed Escape / q: back to the previous screen.
+            None => return Ok(None),
+            Some(0) => {
+                // "New search" selected → use custom live async autocomplete!
+                match crate::live_input::get_live_input("Masukkan judul anime/movie").await? {
+                    Some((raw, is_s))
+                        if !raw.trim().is_empty() && !raw.trim().eq_ignore_ascii_case("q") =>
+                    {
+                        (raw.trim().to_string(), is_s)
+                    }
+                    // Esc / q / empty input returns to the history menu.
+                    _ => continue,
+                }
             }
-            (raw.trim().to_string(), is_s)
-        }
-        Some(idx) => {
-            // History item chosen directly
-            (history[idx - 1].clone(), false)
-        }
-    };
+            Some(idx) => {
+                // History item chosen directly
+                (history[idx - 1].clone(), false)
+            }
+        };
 
-    if title.eq_ignore_ascii_case("q") {
-        return Ok(None);
+        if title.eq_ignore_ascii_case("q") {
+            return Ok(None);
+        }
+
+        // CLI/config provider choices take precedence over the per-title cache.
+        let forced_provider = crate::provider_override().or_else(|| {
+            match crate::config::Config::load().provider {
+                crate::config::ProviderPreference::Idlix => Some(0),
+                crate::config::ProviderPreference::Otakudesu => Some(1),
+                crate::config::ProviderPreference::Auto => None,
+            }
+        });
+        if let Some(tipe) = forced_provider.or_else(|| load_search_provider(&title)) {
+            save_search_provider(&title, tipe);
+            save_history(&title);
+            return Ok(Some(Input { title, tipe }));
+        }
+
+        let Some(tipe) = pick_provider(&title, is_sugg).await? else {
+            // Provider picker cancelled: return to the title menu instead of
+            // dropping the user all the way back to the main menu.
+            continue;
+        };
+
+        save_search_provider(&title, tipe);
+        save_history(&title);
+
+        return Ok(Some(Input { title, tipe }));
     }
-
-    save_history(&title);
-
-    let tipe = pick_provider(&title, is_sugg).await?;
-
-    Ok(Some(Input { title, tipe }))
 }
 
 // ─── Generic choice helper ───────────────────────────────────────────────────
 
-pub fn choice<T: std::fmt::Display + Clone>(options: Vec<T>, _fuzzy: bool) -> anyhow::Result<T> {
-    choice_with_default(options, 0)
-}
-
-pub fn choice_with_default<T: std::fmt::Display + Clone>(
+pub fn choice<T: std::fmt::Display + Clone>(
+    prompt: &str,
     options: Vec<T>,
     default: usize,
-) -> anyhow::Result<T> {
+) -> anyhow::Result<Option<T>> {
     let default = default.min(options.len().saturating_sub(1));
-    let selected = dialoguer::FuzzySelect::with_theme(&crate::util::custom_theme())
-        .with_prompt("Pilih")
-        .default(default)
-        .max_length(8)
-        .items(&options)
-        .interact()?;
-    Ok(options[selected].clone())
+    let entries = options
+        .iter()
+        .map(|option| MenuEntry::new(option.to_string()))
+        .collect::<Vec<_>>();
+    let config = MenuConfig {
+        q_back: true,
+        hint: Some("↑↓ pilih • Enter buka • ketik filter • q+Enter/Esc kembali"),
+        ..Default::default()
+    };
+    match select_menu_custom(prompt, &entries, default, &config)? {
+        MenuResult::Selected(index) => Ok(options.get(index).cloned()),
+        _ => Ok(None),
+    }
 }
 
 // ─── Menu with non-selectable separators ─────────────────────────────────────
@@ -368,35 +571,75 @@ fn visible_entries(entries: &[MenuEntry], filter: &str) -> Vec<usize> {
 }
 
 /// Result of a menu that supports horizontal page navigation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuResult {
     Selected(usize),
     PreviousPage,
     NextPage,
+    /// The user started typing in a paginated picker. The caller can open a
+    /// global search with this text instead of filtering only the current page.
+    SearchFilter(String),
     Cancelled,
 }
 
-/// Select from a list where separator rows are visible but can never become
-/// the active row. Typing filters the selectable entries; Backspace removes the
-/// filter and Escape cancels the selection.
-pub fn select_menu(
-    prompt: &str,
-    entries: &[MenuEntry],
-    default: usize,
-) -> anyhow::Result<Option<usize>> {
-    match run_menu(prompt, entries, default, false, false)? {
-        MenuResult::Selected(index) => Ok(Some(index)),
-        _ => Ok(None),
+/// Shared menu options. The defaults match the normal searchable picker:
+/// typing filters entries and Escape cancels.
+#[derive(Debug, Clone)]
+pub struct MenuConfig<'a> {
+    pub page_keys: bool,
+    pub q_back: bool,
+    pub allow_filter: bool,
+    /// Return the first typed character as `SearchFilter` instead of filtering
+    /// the entries that are currently visible.
+    pub filter_returns_search: bool,
+    pub initial_filter: String,
+    pub hint: Option<&'a str>,
+}
+
+impl Default for MenuConfig<'_> {
+    fn default() -> Self {
+        Self {
+            page_keys: false,
+            q_back: false,
+            allow_filter: true,
+            filter_returns_search: false,
+            initial_filter: String::new(),
+            hint: None,
+        }
     }
 }
 
-/// History picker variant where typing `q` and pressing Enter cancels.
+/// History/stream picker variant where typing `q` and pressing Enter cancels.
 pub fn select_menu_q_back(
     prompt: &str,
     entries: &[MenuEntry],
     default: usize,
 ) -> anyhow::Result<Option<usize>> {
-    match run_menu(prompt, entries, default, false, true)? {
+    let config = MenuConfig {
+        q_back: true,
+        hint: Some("↑↓ pilih • Enter buka • ketik filter • q+Enter/Esc kembali"),
+        ..Default::default()
+    };
+    match run_menu(prompt, entries, default, &config)? {
+        MenuResult::Selected(index) => Ok(Some(index)),
+        _ => Ok(None),
+    }
+}
+
+/// Simple arrow-key menu without text filtering. Used for main menus and
+/// action menus where typing should not accidentally filter the choices.
+pub fn select_menu_simple(
+    prompt: &str,
+    entries: &[MenuEntry],
+    default: usize,
+) -> anyhow::Result<Option<usize>> {
+    let config = MenuConfig {
+        q_back: true,
+        allow_filter: false,
+        hint: Some("↑↓ pilih • Enter buka • q/Esc kembali"),
+        ..Default::default()
+    };
+    match run_menu(prompt, entries, default, &config)? {
         MenuResult::Selected(index) => Ok(Some(index)),
         _ => Ok(None),
     }
@@ -409,15 +652,29 @@ pub fn select_menu_paged(
     entries: &[MenuEntry],
     default: usize,
 ) -> anyhow::Result<MenuResult> {
-    run_menu(prompt, entries, default, true, false)
+    let config = MenuConfig {
+        page_keys: true,
+        filter_returns_search: true,
+        hint: Some("↑↓ pilih • ←/→ halaman • ketik cari semua • Esc kembali"),
+        ..Default::default()
+    };
+    run_menu(prompt, entries, default, &config)
+}
+
+pub fn select_menu_custom(
+    prompt: &str,
+    entries: &[MenuEntry],
+    default: usize,
+    config: &MenuConfig<'_>,
+) -> anyhow::Result<MenuResult> {
+    run_menu(prompt, entries, default, config)
 }
 
 fn run_menu(
     prompt: &str,
     entries: &[MenuEntry],
     default: usize,
-    page_keys: bool,
-    q_back: bool,
+    config: &MenuConfig<'_>,
 ) -> anyhow::Result<MenuResult> {
     if entries.iter().all(|entry| !entry.selectable) {
         anyhow::bail!("menu tidak memiliki pilihan");
@@ -425,7 +682,7 @@ fn run_menu(
 
     let term = Term::stderr();
     term.hide_cursor()?;
-    let result = run_select_menu(&term, prompt, entries, default, page_keys, q_back);
+    let result = run_select_menu(&term, prompt, entries, default, config);
     term.show_cursor()?;
     result
 }
@@ -435,10 +692,9 @@ fn run_select_menu(
     prompt: &str,
     entries: &[MenuEntry],
     default: usize,
-    page_keys: bool,
-    q_back: bool,
+    config: &MenuConfig<'_>,
 ) -> anyhow::Result<MenuResult> {
-    let mut filter = String::new();
+    let mut filter = config.initial_filter.clone();
     let mut selected = {
         let visible = visible_entries(entries, &filter);
         let start = default.min(entries.len());
@@ -474,7 +730,7 @@ fn run_select_menu(
         let mut lines = 1usize;
 
         if visible.is_empty() {
-            let empty_text = if is_q_back(&filter, q_back) {
+            let empty_text = if is_q_back(&filter, config.q_back) {
                 "Tekan Enter untuk kembali"
             } else {
                 "(tidak ada hasil)"
@@ -484,7 +740,7 @@ fn run_select_menu(
             lines += 1;
         } else {
             let max_rows = (rows as usize)
-                .saturating_sub(3)
+                .saturating_sub(4)
                 .clamp(1, 10)
                 .min(visible.len());
             let item_width = columns.saturating_sub(2).max(1);
@@ -510,6 +766,12 @@ fn run_select_menu(
                 }
                 lines += 1;
             }
+        }
+
+        if let Some(hint) = config.hint {
+            let hint = fit_line(hint, columns.saturating_sub(2));
+            term.write_line(&format!("  {}", style(&hint).dim()))?;
+            lines += 1;
         }
 
         drawn_lines = lines;
@@ -547,19 +809,34 @@ fn run_select_menu(
                     .find(|&index| entries[index].selectable);
             }
             Key::Backspace => {
-                if !filter.is_empty() {
+                if config.allow_filter && !filter.is_empty() {
                     filter.pop();
                     let visible = visible_entries(entries, &filter);
                     selected = first_selectable(entries, &visible);
                 }
             }
-            Key::Char(ch) if !ch.is_control() => {
+            Key::Char('q') | Key::Char('Q') if config.q_back && !config.allow_filter => {
+                term.clear_last_lines(drawn_lines)?;
+                term.flush()?;
+                return Ok(MenuResult::Cancelled);
+            }
+            Key::Char(ch) if config.allow_filter && !ch.is_control() => {
                 filter.push(ch);
+                if config.filter_returns_search {
+                    term.clear_last_lines(drawn_lines)?;
+                    term.flush()?;
+                    return Ok(MenuResult::SearchFilter(filter));
+                }
                 let visible = visible_entries(entries, &filter);
                 selected = first_selectable(entries, &visible);
             }
+            Key::CtrlC => {
+                term.clear_last_lines(drawn_lines)?;
+                term.flush()?;
+                return Ok(MenuResult::Cancelled);
+            }
             Key::Enter => {
-                if is_q_back(&filter, q_back) {
+                if is_q_back(&filter, config.q_back) {
                     term.clear_last_lines(drawn_lines)?;
                     term.flush()?;
                     return Ok(MenuResult::Cancelled);
@@ -573,12 +850,12 @@ fn run_select_menu(
                     return Ok(MenuResult::Selected(index));
                 }
             }
-            Key::ArrowLeft if page_keys => {
+            Key::ArrowLeft if config.page_keys => {
                 term.clear_last_lines(drawn_lines)?;
                 term.flush()?;
                 return Ok(MenuResult::PreviousPage);
             }
-            Key::ArrowRight if page_keys => {
+            Key::ArrowRight if config.page_keys => {
                 term.clear_last_lines(drawn_lines)?;
                 term.flush()?;
                 return Ok(MenuResult::NextPage);

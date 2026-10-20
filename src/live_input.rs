@@ -1,14 +1,63 @@
 use std::time::Duration;
 use crossterm::{
     cursor,
-    event::{Event, EventStream, KeyCode, KeyModifiers},
+    event::{
+        DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyModifiers,
+    },
     execute, queue,
     style::{Color, Print, ResetColor, SetForegroundColor},
     terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType},
 };
+use dialoguer::console::measure_text_width;
 use futures::StreamExt;
 use std::io::{stdout, Write};
 use tokio::sync::mpsc;
+
+fn prev_boundary(text: &str, mut index: usize) -> usize {
+    if index == 0 {
+        return 0;
+    }
+    index -= 1;
+    while !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn next_boundary(text: &str, mut index: usize) -> usize {
+    if index >= text.len() {
+        return text.len();
+    }
+    index += 1;
+    while !text.is_char_boundary(index) {
+        index += 1;
+    }
+    index
+}
+
+fn local_suggestions(history: &[String], query: &str) -> Vec<String> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return vec![];
+    }
+    history
+        .iter()
+        .filter(|title| title.to_lowercase().contains(&query))
+        .take(4)
+        .cloned()
+        .collect()
+}
+
+fn merge_suggestions(local: Vec<String>, remote: Vec<String>) -> Vec<String> {
+    let mut merged = local;
+    for title in remote {
+        if !merged.iter().any(|existing| existing.eq_ignore_ascii_case(&title)) {
+            merged.push(title);
+        }
+    }
+    merged.truncate(6);
+    merged
+}
 
 #[derive(Debug)]
 pub enum FetchResult {
@@ -76,14 +125,15 @@ struct RawModeGuard;
 impl RawModeGuard {
     fn new() -> std::io::Result<Self> {
         enable_raw_mode()?;
+        let _ = execute!(stdout(), EnableBracketedPaste);
         Ok(Self)
     }
 }
 
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
+        let _ = execute!(stdout(), DisableBracketedPaste, cursor::Show);
         let _ = disable_raw_mode();
-        let _ = execute!(stdout(), cursor::Show);
     }
 }
 
@@ -92,6 +142,8 @@ pub async fn get_live_input(prompt: &str) -> anyhow::Result<Option<(String, bool
     let mut stdout_handle = stdout();
     
     let mut input = String::new();
+    let mut cursor_index = 0usize;
+    let local_history = crate::input::load_history();
     let mut suggestions: Vec<String> = vec![];
     let mut selected_index: Option<usize> = None;
     let mut is_loading = false;
@@ -101,7 +153,7 @@ pub async fn get_live_input(prompt: &str) -> anyhow::Result<Option<(String, bool
     let (tx, mut rx) = mpsc::channel(10);
     
     // Render closure
-    let mut render = |input: &str, suggestions: &[String], selected: Option<usize>, loading: bool| -> anyhow::Result<()> {
+    let mut render = |input: &str, cursor_index: usize, suggestions: &[String], selected: Option<usize>, loading: bool| -> anyhow::Result<()> {
         queue!(
             stdout_handle,
             cursor::Hide,
@@ -151,17 +203,18 @@ pub async fn get_live_input(prompt: &str) -> anyhow::Result<Option<(String, bool
             queue!(stdout_handle, cursor::MoveUp(lines_down))?;
         }
         
-        let prompt_len = 2 + prompt.len() + 3; // "? " + prompt + " > "
+        let prompt_len = 2 + measure_text_width(prompt) + 3; // "? " + prompt + " > "
+        let typed_width = measure_text_width(&input[..cursor_index]);
         queue!(
             stdout_handle,
-            cursor::MoveToColumn((prompt_len + input.len()) as u16),
+            cursor::MoveToColumn((prompt_len + typed_width) as u16),
             cursor::Show
         )?;
         stdout_handle.flush()?;
         Ok(())
     };
 
-    render(&input, &suggestions, selected_index, is_loading)?;
+    render(&input, cursor_index, &suggestions, selected_index, is_loading)?;
 
     let debounce_timer = tokio::time::sleep(Duration::MAX);
     tokio::pin!(debounce_timer);
@@ -176,7 +229,10 @@ pub async fn get_live_input(prompt: &str) -> anyhow::Result<Option<(String, bool
                 if input != last_fetched_query && !input.trim().is_empty() {
                     is_loading = true;
                     selected_index = None;
-                    render(&input, &suggestions, selected_index, is_loading)?;
+                    // Show local history matches immediately; the network
+                    // request below will refine the list when it arrives.
+                    suggestions = local_suggestions(&local_history, &input);
+                    render(&input, cursor_index, &suggestions, selected_index, is_loading)?;
                     
                     if let Some(t) = fetch_task.take() {
                         t.abort();
@@ -195,22 +251,25 @@ pub async fn get_live_input(prompt: &str) -> anyhow::Result<Option<(String, bool
                 if let Some(res) = fetch_res {
                     is_loading = false;
                     match res {
-                        FetchResult::Success(q, s) => {
+                        FetchResult::Success(q, remote) => {
                             if q == input {
-                                suggestions = s;
+                                let local = local_suggestions(&local_history, &q);
+                                suggestions = merge_suggestions(local, remote);
                                 selected_index = None;
                                 last_fetched_query = q;
                             }
                         }
                         FetchResult::Error(q) => {
                             if q == input {
-                                suggestions.clear();
+                                // Keep local history matches when AniList is
+                                // unreachable, instead of clearing the list.
+                                suggestions = local_suggestions(&local_history, &q);
                                 selected_index = None;
                                 last_fetched_query = q;
                             }
                         }
                     }
-                    render(&input, &suggestions, selected_index, is_loading)?;
+                    render(&input, cursor_index, &suggestions, selected_index, is_loading)?;
                 }
             },
             
@@ -241,18 +300,112 @@ pub async fn get_live_input(prompt: &str) -> anyhow::Result<Option<(String, bool
                                 }
                             }
                             KeyCode::Backspace => {
-                                if !input.is_empty() {
-                                    input.pop();
-                                    debounce_timer.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(500));
+                                if cursor_index > 0 {
+                                    let prev = prev_boundary(&input, cursor_index);
+                                    input.remove(prev);
+                                    cursor_index = prev;
+                                }
+                                if input.trim().is_empty() {
+                                    suggestions.clear();
+                                    is_loading = false;
+                                    last_fetched_query.clear();
+                                    if let Some(t) = fetch_task.take() {
+                                        t.abort();
+                                    }
+                                } else {
+                                    suggestions = local_suggestions(&local_history, &input);
+                                    selected_index = None;
+                                    debounce_timer.as_mut().reset(
+                                        tokio::time::Instant::now() + Duration::from_millis(500),
+                                    );
+                                }
+                            }
+                            KeyCode::Delete => {
+                                if cursor_index < input.len() {
+                                    let next = next_boundary(&input, cursor_index);
+                                    input.drain(cursor_index..next);
+                                    suggestions = local_suggestions(&local_history, &input);
+                                    selected_index = None;
+                                    debounce_timer.as_mut().reset(
+                                        tokio::time::Instant::now() + Duration::from_millis(500),
+                                    );
+                                }
+                            }
+                            KeyCode::Left => {
+                                cursor_index = prev_boundary(&input, cursor_index);
+                            }
+                            KeyCode::Right => {
+                                cursor_index = next_boundary(&input, cursor_index);
+                            }
+                            KeyCode::Home => cursor_index = 0,
+                            KeyCode::End => cursor_index = input.len(),
+                            KeyCode::Tab if !suggestions.is_empty() => {
+                                let index = selected_index.unwrap_or(0);
+                                if let Some(suggestion) = suggestions.get(index) {
+                                    input = suggestion.clone();
+                                    cursor_index = input.len();
+                                    selected_index = None;
+                                    suggestions =
+                                        local_suggestions(&local_history, &input);
                                 }
                             }
                             KeyCode::Char(c) => {
-                                if key_event.modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
-                                    final_result = None;
-                                    break;
+                                if key_event.modifiers.contains(KeyModifiers::CONTROL) {
+                                    match c.to_ascii_lowercase() {
+                                        'c' => {
+                                            final_result = None;
+                                            break;
+                                        }
+                                        'u' => {
+                                            input.drain(..cursor_index);
+                                            cursor_index = 0;
+                                        }
+                                        'w' => {
+                                            let mut start = cursor_index;
+                                            while start > 0 {
+                                                let prev = prev_boundary(&input, start);
+                                                if input[prev..start]
+                                                    .chars()
+                                                    .all(char::is_whitespace)
+                                                {
+                                                    start = prev;
+                                                } else {
+                                                    break;
+                                                }
+                                            }
+                                            while start > 0 {
+                                                let prev = prev_boundary(&input, start);
+                                                if input[prev..start]
+                                                    .chars()
+                                                    .any(char::is_whitespace)
+                                                {
+                                                    break;
+                                                }
+                                                start = prev;
+                                            }
+                                            input.drain(start..cursor_index);
+                                            cursor_index = start;
+                                        }
+                                        _ => {}
+                                    }
+                                } else if !c.is_control() {
+                                    input.insert(cursor_index, c);
+                                    cursor_index += c.len_utf8();
                                 }
-                                input.push(c);
-                                debounce_timer.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(500));
+                                if input.trim().is_empty() {
+                                    suggestions.clear();
+                                    is_loading = false;
+                                    last_fetched_query.clear();
+                                    if let Some(t) = fetch_task.take() {
+                                        t.abort();
+                                    }
+                                } else {
+                                    suggestions = local_suggestions(&local_history, &input);
+                                    selected_index = None;
+                                }
+                                debounce_timer.as_mut().reset(
+                                    tokio::time::Instant::now() + Duration::from_millis(500),
+                                );
                             }
                             KeyCode::Down if !suggestions.is_empty() => {
                                 selected_index = match selected_index {
@@ -269,7 +422,21 @@ pub async fn get_live_input(prompt: &str) -> anyhow::Result<Option<(String, bool
                             }
                             _ => {}
                         }
-                        render(&input, &suggestions, selected_index, is_loading)?;
+                        render(&input, cursor_index, &suggestions, selected_index, is_loading)?;
+                    }
+                    Some(Ok(Event::Paste(text))) => {
+                        let sanitized = text
+                            .chars()
+                            .map(|ch| if ch == '\n' || ch == '\r' { ' ' } else { ch })
+                            .collect::<String>();
+                        input.insert_str(cursor_index, &sanitized);
+                        cursor_index += sanitized.len();
+                        suggestions = local_suggestions(&local_history, &input);
+                        selected_index = None;
+                        debounce_timer.as_mut().reset(
+                            tokio::time::Instant::now() + Duration::from_millis(500),
+                        );
+                        render(&input, cursor_index, &suggestions, selected_index, is_loading)?;
                     }
                     Some(Err(_)) => break,
                     None => break,

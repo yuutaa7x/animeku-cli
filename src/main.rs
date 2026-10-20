@@ -1,6 +1,7 @@
 use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
 use std::io::{stdout, Write};
 use std::process::Command;
+use std::sync::OnceLock;
 use animeku::AnimekuCli;
 use colored::Colorize;
 use ext::otakudesu::{OTAKUDESU_REFERER, OTAKUDESU_USER_AGENT};
@@ -10,13 +11,14 @@ use tokio::runtime;
 use crate::{input::{get_user_input, load_history, save_history, pick_provider, load_watch_history, delete_watch_entry, delete_search_history_entry}, util::clearscreen_and_show_banner};
 
 mod animeku;
+mod config;
 mod episode;
 mod ext;
 mod input;
+mod live_input;
 mod models;
 mod proxy;
 mod util;
-mod live_input;
 
 use episode::{
     clean_title, detect_season, detect_season_from_titles, find_next_episode, format_episode,
@@ -45,10 +47,138 @@ const PROVIDER_IDLIX: usize = 0;
 pub const PROVIDER_OTAKUDESU: usize = 1;
 
 const REPO_URL: &str = "https://github.com/yuutaa7x/animeku-cli";
-const MENU_UPDATE: usize = 0;
-const MENU_WATCH: usize = 1;
-const MENU_HEALTH: usize = 2;
-const MENU_EXIT: usize = 3;
+
+#[derive(Debug, Default)]
+struct CliArgs {
+    search: Option<String>,
+    provider: Option<usize>,
+    player: Option<config::PlayerChoice>,
+    resume: bool,
+    no_rpc: bool,
+}
+
+static CLI_ARGS: OnceLock<CliArgs> = OnceLock::new();
+
+pub(crate) fn provider_override() -> Option<usize> {
+    CLI_ARGS.get().and_then(|args| args.provider)
+}
+
+pub(crate) fn player_override() -> Option<config::PlayerChoice> {
+    CLI_ARGS.get().and_then(|args| args.player)
+}
+
+pub(crate) fn rpc_disabled() -> bool {
+    CLI_ARGS.get().is_some_and(|args| args.no_rpc)
+}
+
+fn cli_search_title() -> Option<String> {
+    CLI_ARGS.get().and_then(|args| args.search.clone())
+}
+
+fn cli_resume() -> bool {
+    CLI_ARGS.get().is_some_and(|args| args.resume)
+}
+
+fn print_help() {
+    println!(
+        "Animeku-CLI v{}\n\nUsage:\n  animeku-cli [OPTIONS] [JUDUL]\n\nOptions:\n  --search <JUDUL>       Langsung cari judul tanpa membuka menu utama\n  --provider <PROVIDER>  auto, idlix, atau otakudesu\n  --player <PLAYER>      ask, mpv, vlc, atau browser\n  --resume               Lanjutkan tontonan terakhir\n  --no-rpc               Matikan Discord Rich Presence untuk sesi ini\n  -h, --help             Tampilkan bantuan\n  -V, --version          Tampilkan versi",
+        env!("CARGO_PKG_VERSION")
+    );
+}
+
+fn parse_args() -> anyhow::Result<CliArgs> {
+    let mut args = CliArgs::default();
+    let mut iter = std::env::args().skip(1);
+    let mut positional = Vec::new();
+
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            positional.extend(iter.by_ref());
+            break;
+        }
+        match arg.as_str() {
+            "-h" | "--help" => {
+                print_help();
+                std::process::exit(0);
+            }
+            "-V" | "--version" => {
+                println!("animeku-cli {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
+            "--resume" => args.resume = true,
+            "--no-rpc" => args.no_rpc = true,
+            "--search" => {
+                let Some(value) = iter.next() else {
+                    anyhow::bail!("--search membutuhkan judul");
+                };
+                args.search = Some(value);
+            }
+            "--provider" => {
+                let Some(value) = iter.next() else {
+                    anyhow::bail!("--provider membutuhkan nilai: auto, idlix, atau otakudesu");
+                };
+                args.provider = match value.to_lowercase().as_str() {
+                    "auto" => None,
+                    "idlix" | "0" => Some(PROVIDER_IDLIX),
+                    "otakudesu" | "1" => Some(PROVIDER_OTAKUDESU),
+                    _ => anyhow::bail!(
+                        "provider tidak dikenal: {value}. Gunakan auto, idlix, atau otakudesu."
+                    ),
+                };
+            }
+            "--player" => {
+                let Some(value) = iter.next() else {
+                    anyhow::bail!("--player membutuhkan nilai: ask, mpv, vlc, atau browser");
+                };
+                args.player = Some(match value.to_lowercase().as_str() {
+                    "ask" => config::PlayerChoice::Ask,
+                    "mpv" => config::PlayerChoice::Mpv,
+                    "vlc" => config::PlayerChoice::Vlc,
+                    "browser" => config::PlayerChoice::Browser,
+                    _ => anyhow::bail!(
+                        "player tidak dikenal: {value}. Gunakan ask, mpv, vlc, atau browser."
+                    ),
+                });
+            }
+            _ if arg.starts_with("--search=") => {
+                args.search = Some(arg["--search=".len()..].to_string());
+            }
+            _ if arg.starts_with("--provider=") => {
+                let value = &arg["--provider=".len()..];
+                args.provider = match value.to_lowercase().as_str() {
+                    "auto" => None,
+                    "idlix" | "0" => Some(PROVIDER_IDLIX),
+                    "otakudesu" | "1" => Some(PROVIDER_OTAKUDESU),
+                    _ => anyhow::bail!(
+                        "provider tidak dikenal: {value}. Gunakan auto, idlix, atau otakudesu."
+                    ),
+                };
+            }
+            _ if arg.starts_with("--player=") => {
+                let value = &arg["--player=".len()..];
+                args.player = Some(match value.to_lowercase().as_str() {
+                    "ask" => config::PlayerChoice::Ask,
+                    "mpv" => config::PlayerChoice::Mpv,
+                    "vlc" => config::PlayerChoice::Vlc,
+                    "browser" => config::PlayerChoice::Browser,
+                    _ => anyhow::bail!(
+                        "player tidak dikenal: {value}. Gunakan ask, mpv, vlc, atau browser."
+                    ),
+                });
+            }
+            _ if arg.starts_with('-') => {
+                anyhow::bail!("opsi tidak dikenal: {arg}. Gunakan --help untuk bantuan.");
+            }
+            _ => positional.push(arg),
+        }
+    }
+
+    if args.search.is_none() && !positional.is_empty() {
+        args.search = Some(positional.join(" "));
+    }
+
+    Ok(args)
+}
 
 fn get_ext_by_provider(provider_type: usize) -> Box<dyn Ext> {
     match provider_type {
@@ -393,7 +523,7 @@ fn show_health_screen() -> anyhow::Result<bool> {
         } else {
             println!("  {} {}", "[ 2 ]".bright_black(), "Continue to Animeku-CLI (Watch Anime - Browser Only)".bright_black());
         }
-        println!("  {} {}", "[ q ]".bright_white(), "Quit".bright_white());
+        println!("  {} {}", "[ q ]".bright_white(), "Kembali".bright_white());
         println!();
         
         print!("  > ");
@@ -403,8 +533,8 @@ fn show_health_screen() -> anyhow::Result<bool> {
         let choice = term.read_char()?;
         println!("{}", choice);
         
-        if choice == 'q' || choice == 'Q' {
-            std::process::exit(0);
+        if choice == 'q' || choice == 'Q' || choice == '\x1b' || choice == '\x03' {
+            return Ok(false);
         } else if choice == '2' || choice == '\n' {
             return Ok(true);
         } else if choice == '1' {
@@ -412,7 +542,7 @@ fn show_health_screen() -> anyhow::Result<bool> {
             if package_manager == "unknown" {
                 if cfg!(target_os = "windows") {
                     println!("\n{} Tidak ditemukan package manager otomatis (winget / choco / scoop).", "■".red());
-                    println!("  Silahkan pilih salah satu opsi instalasi MPV untuk Windows:");
+                    println!("  Silakan pilih salah satu opsi instalasi MPV untuk Windows:");
                     println!("  1. Jalankan di PowerShell / CMD:");
                     println!("     {}", "winget install --id shinchiro.mpv --source winget".cyan());
                     println!("  2. Atau install via Scoop:");
@@ -425,7 +555,7 @@ fn show_health_screen() -> anyhow::Result<bool> {
                         let _ = open::that("https://mpv.io/installation/");
                     }
                 } else {
-                    println!("\n{} Package manager tidak terdeteksi! Silahkan install mpv dan yt-dlp secara manual.", "■".red());
+                    println!("\n{} Package manager tidak terdeteksi! Silakan install mpv dan yt-dlp secara manual.", "■".red());
                 }
             } else {
                 install_dependencies(package_manager);
@@ -573,7 +703,11 @@ fn reset_discord_status(discord: &mut Option<DiscordIpcClient>) {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlaybackOutcome {
-    Played { position: u64, offer_next: bool },
+    Played {
+        position: u64,
+        offer_next: bool,
+        completed: bool,
+    },
     Cancelled,
 }
 
@@ -582,36 +716,83 @@ async fn execute_player(
     provider_type: usize,
     start_seconds: u64,
 ) -> anyhow::Result<PlaybackOutcome> {
-    println!("{} Membuka tautan di aplikasi eksternal .. ", "◆".blue());
+    println!("{} Menyiapkan pemutar video .. ", "◆".blue());
     stdout().flush()?;
 
+    let config = config::Config::load();
     let is_android = std::env::var("TERMUX_VERSION").is_ok();
+    let override_player = player_override();
+    let configured_player = override_player.unwrap_or_else(|| config.effective_player());
+    let use_picker = override_player
+        .map(|player| player == config::PlayerChoice::Ask)
+        .unwrap_or(config.player == config::PlayerChoice::Ask);
 
-    let menu_items = if is_android {
-        vec!["Putar di VLC / Pemutar Android", "Buka di Browser", "Kembali"]
-    } else {
-        vec!["Putar dengan MPV", "Putar dengan VLC", "Buka di Browser", "Kembali"]
-    };
-
-    let player_choice = dialoguer::Select::with_theme(&crate::util::custom_theme())
-        .with_prompt("Pilih Aksi:")
-        .default(0)
-        .items(&menu_items)
-        .interact()?;
-
-    let choice_normalized = if is_android {
-        match player_choice {
-            0 => 1, // Map to VLC / Android Native
-            1 => 2, // Map to Browser
-            _ => 3, // Map to Kembali
+    let selected_player = if use_picker {
+        let labels = if is_android {
+            vec!["Putar di VLC / Pemutar Android", "Buka di Browser", "Kembali"]
+        } else {
+            vec!["Putar dengan MPV", "Putar dengan VLC", "Buka di Browser", "Kembali"]
+        };
+        let entries = labels
+            .iter()
+            .map(|label| input::MenuEntry::new(*label))
+            .collect::<Vec<_>>();
+        let last = configured_player;
+        let default = if is_android {
+            match last {
+                config::PlayerChoice::Browser => 1,
+                _ => 0,
+            }
+        } else {
+            match last {
+                config::PlayerChoice::Mpv => 0,
+                config::PlayerChoice::Vlc => 1,
+                config::PlayerChoice::Browser => 2,
+                config::PlayerChoice::Ask => 0,
+            }
+        };
+        let Some(index) = input::select_menu_simple("Pilih Pemutar:", &entries, default)? else {
+            return Ok(PlaybackOutcome::Cancelled);
+        };
+        let selected = if is_android {
+            match index {
+                0 => config::PlayerChoice::Vlc,
+                1 => config::PlayerChoice::Browser,
+                _ => return Ok(PlaybackOutcome::Cancelled),
+            }
+        } else {
+            match index {
+                0 => config::PlayerChoice::Mpv,
+                1 => config::PlayerChoice::Vlc,
+                2 => config::PlayerChoice::Browser,
+                _ => return Ok(PlaybackOutcome::Cancelled),
+            }
+        };
+        let mut updated = config.clone();
+        updated.last_player = Some(selected);
+        updated.save();
+        selected
+    } else if is_android {
+        match configured_player {
+            config::PlayerChoice::Browser => config::PlayerChoice::Browser,
+            _ => config::PlayerChoice::Vlc,
         }
     } else {
-        player_choice
+        configured_player
+    };
+
+    println!("Memutar dengan {}...", selected_player.label());
+    let choice_normalized: usize = match selected_player {
+        config::PlayerChoice::Mpv => 0,
+        config::PlayerChoice::Vlc => 1,
+        config::PlayerChoice::Browser => 2,
+        config::PlayerChoice::Ask => 0,
     };
 
     let mut final_pos = start_seconds;
     let mut played = false;
     let mut offer_next = true;
+    let mut completed = false;
 
     match choice_normalized {
         0 => {
@@ -729,7 +910,7 @@ mp.register_event("shutdown", save)
                 // Simpan subtitle ke folder Download agar user bisa nge-load manual
                 let sub_path = crate::util::get_subtitle_path();
                 if std::path::Path::new(&sub_path).exists() && sub_path.contains("Download") {
-                    println!("{} Subtitle disimpan di folder Download (animeku_idlix.vtt). Silahkan load manual di VLC.", "ℹ".yellow());
+                    println!("{} Subtitle disimpan di folder Download (animeku_idlix.vtt). Silakan load manual di VLC.", "ℹ".yellow());
                 }
 
                 // Kita nyalakan Local HTTP Proxy untuk memanipulasi Header!
@@ -774,6 +955,7 @@ mp.register_event("shutdown", save)
                         final_pos = m * 60;
                     } else if pos_input.trim().is_empty() {
                         final_pos = 0;
+                        completed = true;
                     }
                 }
             } else {
@@ -807,6 +989,7 @@ mp.register_event("shutdown", save)
                         final_pos = m * 60;
                     } else if pos_input.trim().is_empty() {
                         final_pos = 0;
+                        completed = true;
                     }
                 }
             }
@@ -835,6 +1018,7 @@ mp.register_event("shutdown", save)
         Ok(PlaybackOutcome::Played {
             position: final_pos,
             offer_next,
+            completed,
         })
     } else {
         Ok(PlaybackOutcome::Cancelled)
@@ -873,14 +1057,20 @@ enum EpisodePlayback {
 }
 
 fn confirm_next_episode(next_ep: &crate::models::Episode) -> anyhow::Result<bool> {
-    Ok(dialoguer::Confirm::with_theme(&crate::util::custom_theme())
-        .with_prompt(format!("Lanjut ke {}?", next_ep.title.trim()))
-        .default(true)
-        // `default(true)` membuat dialoguer menampilkan kata "yes" sebagai
-        // hint sebelum user menjawab. Sembunyikan hint itu, tapi Enter tetap
-        // berarti "ya".
-        .show_default(false)
-        .interact()?)
+    match config::Config::load().auto_next {
+        config::AutoNext::Always => Ok(true),
+        config::AutoNext::Never => Ok(false),
+        config::AutoNext::Ask => Ok(dialoguer::Confirm::with_theme(&crate::util::custom_theme())
+            .with_prompt(format!(
+                "Lanjut ke {}? (Esc = tidak)",
+                next_ep.title.trim()
+            ))
+            .default(true)
+            // Sembunyikan hint "yes" bawaan dialoguer; Enter tetap berarti ya.
+            .show_default(false)
+            .interact_opt()?
+            .unwrap_or(false)),
+    }
 }
 
 /// Play one episode and persist its progress. Returning a distinct result for
@@ -923,12 +1113,14 @@ async fn play_episode(
         PlaybackOutcome::Played {
             position,
             offer_next,
+            completed,
         } => {
             input::save_watch_entry(&crate::models::WatchEntry {
                 movie: movie.clone(),
                 episode: episode.clone(),
                 provider_type,
                 position_seconds: position,
+                completed,
                 updated_at: 0,
             });
             Ok(EpisodePlayback::Played { offer_next })
@@ -992,21 +1184,279 @@ async fn handle_movie_episodes(
     Ok(())
 }
 
-fn show_main_menu() -> anyhow::Result<usize> {
-    let items = [
-        "1. Update Animeku-CLI",
-        "2. Go Watch Anime / Movie",
-        "3. Check Health",
-        "4. Exit",
+async fn resume_watch_entry(
+    discord: &mut Option<DiscordIpcClient>,
+    entry: &crate::models::WatchEntry,
+    start_seconds: u64,
+) -> anyhow::Result<()> {
+    let mut animeku = AnimekuCli::new(get_ext_by_provider(entry.provider_type));
+    // Populate the episode cache so auto-next can follow the provider's
+    // ordered list instead of stopping after the resumed episode.
+    let _ = animeku.ensure_meta(&entry.movie).await;
+
+    let mut episode = entry.episode.clone();
+    let mut start_seconds = start_seconds;
+
+    loop {
+        match play_episode(
+            &mut animeku,
+            &entry.movie,
+            &episode,
+            entry.provider_type,
+            start_seconds,
+            discord,
+        )
+        .await?
+        {
+            EpisodePlayback::PlayerCancelled => continue,
+            EpisodePlayback::StreamCancelled => break,
+            EpisodePlayback::Played { offer_next } => {
+                if offer_next {
+                    let next_ep_opt = animeku
+                        .get_episode_list(&entry.movie.id)
+                        .and_then(|episodes| find_next_episode(&episodes, &episode).cloned());
+
+                    if let Some(next_ep) = next_ep_opt {
+                        if confirm_next_episode(&next_ep)? {
+                            episode = next_ep;
+                            start_seconds = 0;
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_resume_latest(discord: &mut Option<DiscordIpcClient>) -> anyhow::Result<()> {
+    let Some(entry) = load_watch_history().into_iter().next() else {
+        clearscreen_and_show_banner()?;
+        println!("Belum ada riwayat tontonan.\n");
+        println!("Tekan Enter untuk kembali...");
+        let mut dummy = String::new();
+        let _ = std::io::stdin().read_line(&mut dummy);
+        return Ok(());
+    };
+
+    resume_watch_entry(discord, &entry, entry.position_seconds).await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MainAction {
+    Continue,
+    Search,
+    History,
+    Settings,
+    Health,
+    Update,
+    Exit,
+}
+
+fn show_main_menu() -> anyhow::Result<Option<MainAction>> {
+    let watch_history = load_watch_history();
+
+    let mut entries = Vec::new();
+    let mut actions = Vec::new();
+
+    if let Some(entry) = watch_history.first() {
+        entries.push(input::MenuEntry::new(format!(
+            "[ Lanjutkan: {} - {} | {} ]",
+            crate::models::clean_movie_title(&entry.movie.title),
+            crate::models::clean_episode_title(&entry.episode.title),
+            entry.format_duration()
+        )));
+        actions.push(MainAction::Continue);
+    }
+
+    for (label, action) in [
+        ("Cari anime / film", MainAction::Search),
+        ("Riwayat", MainAction::History),
+        ("Pengaturan", MainAction::Settings),
+        ("Cek kesehatan", MainAction::Health),
+        ("Perbarui Animeku-CLI", MainAction::Update),
+        ("Keluar", MainAction::Exit),
+    ] {
+        entries.push(input::MenuEntry::new(label));
+        actions.push(action);
+    }
+
+    let Some(index) = input::select_menu_simple("Menu Utama:", &entries, 0)? else {
+        return Ok(Some(MainAction::Exit));
+    };
+
+    Ok(actions.get(index).copied())
+}
+
+fn confirm_action(prompt: &str) -> anyhow::Result<bool> {
+    Ok(dialoguer::Confirm::with_theme(&crate::util::custom_theme())
+        .with_prompt(prompt)
+        .default(false)
+        .interact_opt()?
+        .unwrap_or(false))
+}
+
+fn choose_player_setting(config: &mut config::Config) -> anyhow::Result<()> {
+    let labels = [
+        "Tanya setiap kali",
+        "MPV",
+        "VLC",
+        "Browser",
+        "Kembali",
     ];
+    let entries = labels
+        .iter()
+        .map(|label| input::MenuEntry::new(*label))
+        .collect::<Vec<_>>();
+    let default = match config.player {
+        config::PlayerChoice::Ask => 0,
+        config::PlayerChoice::Mpv => 1,
+        config::PlayerChoice::Vlc => 2,
+        config::PlayerChoice::Browser => 3,
+    };
+    let Some(index) = input::select_menu_simple("Player default:", &entries, default)? else {
+        return Ok(());
+    };
+    if index < 4 {
+        config.player = config::PlayerChoice::from_index(index);
+        if index > 0 {
+            config.last_player = Some(config.player);
+        }
+        config.save();
+    }
+    Ok(())
+}
 
-    let choice = dialoguer::Select::with_theme(&crate::util::custom_theme())
-        .with_prompt("Pilih Menu:")
-        .default(MENU_WATCH)
-        .items(&items)
-        .interact()?;
+fn choose_auto_next_setting(config: &mut config::Config) -> anyhow::Result<()> {
+    let labels = ["Tanya", "Selalu lanjut", "Jangan pernah", "Kembali"];
+    let entries = labels
+        .iter()
+        .map(|label| input::MenuEntry::new(*label))
+        .collect::<Vec<_>>();
+    let default = match config.auto_next {
+        config::AutoNext::Ask => 0,
+        config::AutoNext::Always => 1,
+        config::AutoNext::Never => 2,
+    };
+    let Some(index) = input::select_menu_simple("Auto-next episode:", &entries, default)? else {
+        return Ok(());
+    };
+    if index < 3 {
+        config.auto_next = config::AutoNext::from_index(index);
+        config.save();
+    }
+    Ok(())
+}
 
-    Ok(choice)
+fn choose_provider_setting(config: &mut config::Config) -> anyhow::Result<()> {
+    let labels = ["Otomatis", "Idlix", "Otakudesu", "Kembali"];
+    let entries = labels
+        .iter()
+        .map(|label| input::MenuEntry::new(*label))
+        .collect::<Vec<_>>();
+    let default = match config.provider {
+        config::ProviderPreference::Auto => 0,
+        config::ProviderPreference::Idlix => 1,
+        config::ProviderPreference::Otakudesu => 2,
+    };
+    let Some(index) = input::select_menu_simple("Provider default:", &entries, default)? else {
+        return Ok(());
+    };
+    if index < 3 {
+        config.provider = config::ProviderPreference::from_index(index);
+        config.save();
+    }
+    Ok(())
+}
+
+async fn handle_settings_menu(discord: &mut Option<DiscordIpcClient>) -> anyhow::Result<()> {
+    loop {
+        clearscreen_and_show_banner()?;
+        let mut config = config::Config::load();
+
+        let labels = [
+            format!("Player default: {}", config.player.label()),
+            format!("Auto-next: {}", config.auto_next.label()),
+            format!("Provider: {}", config.provider.label()),
+            format!(
+                "Discord RPC: {}",
+                if config.rpc { "Aktif" } else { "Mati" }
+            ),
+            format!(
+                "Banner compact: {}",
+                if config.compact_banner { "Aktif" } else { "Mati" }
+            ),
+            format!(
+                "Poster episode: {}",
+                if config.show_posters { "Aktif" } else { "Mati" }
+            ),
+            "Hapus riwayat pencarian".to_string(),
+            "Hapus riwayat tontonan".to_string(),
+            "Hapus cache provider".to_string(),
+            "Perbarui Animeku-CLI".to_string(),
+            "Kembali".to_string(),
+        ];
+        let entries = labels
+            .iter()
+            .cloned()
+            .map(input::MenuEntry::new)
+            .collect::<Vec<_>>();
+
+        let Some(choice) = input::select_menu_simple("Pengaturan:", &entries, 0)? else {
+            break;
+        };
+
+        match choice {
+            0 => choose_player_setting(&mut config)?,
+            1 => choose_auto_next_setting(&mut config)?,
+            2 => choose_provider_setting(&mut config)?,
+            3 => {
+                config.rpc = !config.rpc;
+                config.save();
+                if config.rpc {
+                    let mut client = DiscordIpcClient::new(DISCORD_APP_ID);
+                    if client.connect().is_ok() {
+                        *discord = Some(client);
+                        reset_discord_status(discord);
+                    } else {
+                        *discord = None;
+                    }
+                } else {
+                    *discord = None;
+                }
+            }
+            4 => {
+                config.compact_banner = !config.compact_banner;
+                config.save();
+            }
+            5 => {
+                config.show_posters = !config.show_posters;
+                config.save();
+            }
+            6 => {
+                if confirm_action("Hapus semua riwayat pencarian?")? {
+                    input::clear_search_history();
+                }
+            }
+            7 => {
+                if confirm_action("Hapus semua riwayat tontonan?")? {
+                    input::clear_watch_history();
+                }
+            }
+            8 => {
+                if confirm_action("Hapus cache deteksi dan pilihan provider?")? {
+                    input::clear_provider_detections();
+                    input::clear_search_providers();
+                }
+            }
+            9 => handle_self_update()?,
+            _ => break,
+        }
+    }
+    Ok(())
 }
 
 /// Return the source checkout only when the current directory is actually this
@@ -1046,7 +1496,7 @@ fn handle_self_update() -> anyhow::Result<()> {
     // return on Windows would leave the binary renamed to `.exe.old`.
     if local_repo.is_some() && !check_command_exists("git") {
         println!("\n  {} git tidak ditemukan di PATH.", "■".red());
-        println!("  Silahkan install git terlebih dahulu, lalu jalankan ulang update ini.");
+        println!("  Silakan install git terlebih dahulu, lalu jalankan ulang update ini.");
         println!("\nTekan Enter untuk kembali ke menu...");
         let mut dummy = String::new();
         let _ = std::io::stdin().read_line(&mut dummy);
@@ -1108,14 +1558,14 @@ fn handle_self_update() -> anyhow::Result<()> {
             if let Some((_, old_exe)) = renamed_old {
                 let _ = std::fs::remove_file(old_exe);
             }
-            println!("  Silahkan jalankan ulang aplikasi.");
+            println!("  Silakan jalankan ulang aplikasi.");
         }
         _ => {
             if let Some((current_exe, old_exe)) = renamed_old {
                 let _ = std::fs::rename(old_exe, current_exe);
             }
             println!("\n  {} Gagal memperbarui secara otomatis.", "■".red());
-            println!("  Silahkan jalankan secara manual:");
+            println!("  Silakan jalankan secara manual:");
             println!("  cargo install --git {} --force", REPO_URL);
         }
     }
@@ -1123,6 +1573,42 @@ fn handle_self_update() -> anyhow::Result<()> {
     println!("\nTekan Enter untuk kembali ke menu...");
     let mut dummy = String::new();
     let _ = std::io::stdin().read_line(&mut dummy);
+    Ok(())
+}
+
+async fn run_cli_search(
+    discord: &mut Option<DiscordIpcClient>,
+    title: String,
+) -> anyhow::Result<()> {
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        anyhow::bail!("judul pencarian kosong");
+    }
+
+    let tipe = provider_override()
+        .or_else(|| {
+            match config::Config::load().provider {
+                config::ProviderPreference::Idlix => Some(PROVIDER_IDLIX),
+                config::ProviderPreference::Otakudesu => Some(PROVIDER_OTAKUDESU),
+                config::ProviderPreference::Auto => None,
+            }
+        })
+        .unwrap_or(PROVIDER_IDLIX);
+    input::save_search_provider(&title, tipe);
+    save_history(&title);
+
+    let input_data = crate::models::Input { title, tipe };
+    let extractor = get_ext(&input_data);
+    let mut animeku = AnimekuCli::new(extractor);
+
+    loop {
+        clearscreen_and_show_banner()?;
+        let Some(movie) = animeku.search(&input_data.title).await? else {
+            break;
+        };
+        handle_movie_episodes(&mut animeku, &movie, tipe, discord).await?;
+    }
+
     Ok(())
 }
 
@@ -1161,12 +1647,17 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
 
         // 1. Add Watch History entries
         for lw in &watch_history {
-            let provider_name = if lw.provider_type == PROVIDER_OTAKUDESU { "Otakudesu" } else { "Idlix" };
+            let provider_name = if lw.provider_type == PROVIDER_OTAKUDESU {
+                "Otakudesu"
+            } else {
+                "Idlix"
+            };
             menu_items.push(input::MenuEntry::new(format!(
-                "[ Lanjutkan: {} - {} | {} | {} ]",
+                "[ {} - {} | {} | {} | {} ]",
                 crate::models::clean_movie_title(&lw.movie.title),
                 crate::models::clean_episode_title(&lw.episode.title),
-                lw.format_duration(),
+                lw.status_label(),
+                lw.format_updated(),
                 provider_name
             )));
         }
@@ -1183,7 +1674,7 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
         let separator_index: Option<usize> = if !search_history.is_empty() {
             let idx = menu_items.len();
             menu_items.push(input::MenuEntry::separator(
-                "─── Search History ───────────────────────────",
+                "─── Riwayat Pencarian ────────────────────────",
             ));
             Some(idx)
         } else {
@@ -1193,15 +1684,30 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
         for title in &search_history {
             menu_items.push(input::MenuEntry::new(format!("  {}", title)));
         }
-        menu_items.push(input::MenuEntry::new("  Kembali"));
 
-        let Some(choice) = input::select_menu("Watch & Search History:", &menu_items, 0)? else {
+        menu_items.push(input::MenuEntry::separator(
+            "─── Aksi ─────────────────────────────────────",
+        ));
+        menu_items.push(input::MenuEntry::new("Hapus Semua Riwayat"));
+        menu_items.push(input::MenuEntry::new("Kembali"));
+
+        let Some(choice) =
+            input::select_menu_q_back("Riwayat Tontonan & Pencarian:", &menu_items, 0)?
+        else {
             break;
         };
 
         let back_index = menu_items.len() - 1;
+        let clear_index = menu_items.len() - 2;
         if choice == back_index {
             break;
+        }
+        if choice == clear_index {
+            if confirm_action("Hapus semua riwayat tontonan dan pencarian?")? {
+                input::clear_watch_history();
+                input::clear_search_history();
+            }
+            continue;
         }
 
         let watch_count = watch_history.len();
@@ -1216,74 +1722,62 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
             println!("Riwayat Tontonan:");
             println!("  Judul    : {}", display_title);
             println!("  Episode  : {}", display_episode);
-            println!("  Posisi   : {}", selected_watch.format_duration());
-            let provider_name = if selected_watch.provider_type == PROVIDER_OTAKUDESU { "Otakudesu" } else { "Idlix" };
+            println!("  Status   : {}", selected_watch.status_label());
+            println!("  Terakhir : {}", selected_watch.format_updated());
+            let provider_name = if selected_watch.provider_type == PROVIDER_OTAKUDESU {
+                "Otakudesu"
+            } else {
+                "Idlix"
+            };
             println!("  Provider : {}\n", provider_name);
 
             let actions = [
-                format!("1. Lanjutkan Menonton (mulai {})", selected_watch.format_duration()),
-                "2. Putar Ulang dari Awal (00:00)".to_string(),
-                "3. Hapus dari Histori".to_string(),
-                "4. Kembali".to_string(),
+                format!(
+                    "Lanjutkan Menonton (mulai {})",
+                    selected_watch.format_duration()
+                ),
+                "Putar Ulang dari Awal (00:00)".to_string(),
+                "Pilih Episode Lain".to_string(),
+                "Hapus dari Histori".to_string(),
+                "Kembali".to_string(),
             ];
+            let entries = actions
+                .iter()
+                .cloned()
+                .map(input::MenuEntry::new)
+                .collect::<Vec<_>>();
 
-            let action_choice = dialoguer::Select::with_theme(&crate::util::custom_theme())
-                .with_prompt("Pilih Aksi:")
-                .default(0)
-                .items(&actions)
-                .interact()?;
-
-            if action_choice == 2 {
-                delete_watch_entry(choice);
+            let Some(action_choice) = input::select_menu_simple("Pilih Tindakan:", &entries, 0)? else {
                 continue;
-            } else if action_choice == 3 {
+            };
+
+            if action_choice == 3 {
+                if confirm_action(&format!("Hapus {} dari histori?", display_title))? {
+                    delete_watch_entry(choice);
+                }
                 continue;
-            }
-
-            let start_seconds = if action_choice == 0 { selected_watch.position_seconds } else { 0 };
-
-            let mut animeku = AnimekuCli::new(get_ext_by_provider(selected_watch.provider_type));
-            // Populate the episode cache so auto-next can follow the provider's
-            // ordered list instead of stopping after the resumed episode.
-            let _ = animeku.ensure_meta(&selected_watch.movie).await;
-
-            let mut episode = selected_watch.episode.clone();
-            let mut start_seconds = start_seconds;
-
-            loop {
-                match play_episode(
+            } else if action_choice == 4 {
+                continue;
+            } else if action_choice == 2 {
+                let mut animeku =
+                    AnimekuCli::new(get_ext_by_provider(selected_watch.provider_type));
+                handle_movie_episodes(
                     &mut animeku,
                     &selected_watch.movie,
-                    &episode,
                     selected_watch.provider_type,
-                    start_seconds,
                     discord,
                 )
-                .await?
-                {
-                    EpisodePlayback::PlayerCancelled => continue,
-                    EpisodePlayback::StreamCancelled => break,
-                    EpisodePlayback::Played { offer_next } => {
-                        if offer_next {
-                            let next_ep_opt = animeku
-                                .get_episode_list(&selected_watch.movie.id)
-                                .and_then(|episodes| {
-                                    find_next_episode(&episodes, &episode).cloned()
-                                });
-
-                            if let Some(next_ep) = next_ep_opt {
-                                if confirm_next_episode(&next_ep)? {
-                                    episode = next_ep;
-                                    start_seconds = 0;
-                                    continue;
-                                }
-                            }
-                        }
-                        break;
-                    }
-                }
+                .await?;
+                continue;
             }
 
+            let start_seconds = if action_choice == 0 {
+                selected_watch.position_seconds
+            } else {
+                0
+            };
+
+            resume_watch_entry(discord, &selected_watch, start_seconds).await?;
         } else {
             // Picked from Search History
             let separator_offset = if separator_index.is_some() { 1 } else { 0 };
@@ -1291,28 +1785,59 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
             let selected_title = search_history[history_index].clone();
 
             let actions = [
-                "1. Cari Judul Ini".to_string(),
-                "2. Hapus dari Histori".to_string(),
-                "3. Kembali".to_string(),
+                "Cari Judul Ini".to_string(),
+                "Ganti Provider & Cari".to_string(),
+                "Hapus dari Histori".to_string(),
+                "Kembali".to_string(),
             ];
+            let entries = actions
+                .iter()
+                .cloned()
+                .map(input::MenuEntry::new)
+                .collect::<Vec<_>>();
 
             clearscreen_and_show_banner()?;
             println!("Judul Pencarian: {}\n", selected_title);
 
-            let action_choice = dialoguer::Select::with_theme(&crate::util::custom_theme())
-                .with_prompt("Pilih Aksi:")
-                .default(0)
-                .items(&actions)
-                .interact()?;
-
-            if action_choice == 1 {
-                delete_search_history_entry(&selected_title);
+            let Some(action_choice) = input::select_menu_simple("Pilih Tindakan:", &entries, 0)? else {
                 continue;
+            };
+
+            let mut tipe_override = None;
+            if action_choice == 1 {
+                let Some(provider) = input::choose_provider_manually().await? else {
+                    continue;
+                };
+                input::save_search_provider(&selected_title, provider);
+                tipe_override = Some(provider);
             } else if action_choice == 2 {
+                if confirm_action(&format!("Hapus '{}' dari histori pencarian?", selected_title))? {
+                    delete_search_history_entry(&selected_title);
+                    input::delete_search_provider(&selected_title);
+                }
+                continue;
+            } else if action_choice == 3 {
                 continue;
             }
 
-            let tipe = pick_provider(&selected_title, false).await?;
+            let forced_provider = provider_override().or_else(|| {
+                match config::Config::load().provider {
+                    config::ProviderPreference::Idlix => Some(PROVIDER_IDLIX),
+                    config::ProviderPreference::Otakudesu => Some(PROVIDER_OTAKUDESU),
+                    config::ProviderPreference::Auto => None,
+                }
+            });
+            let tipe = if let Some(provider) = tipe_override.or(forced_provider) {
+                provider
+            } else if let Some(cached) = input::load_search_provider(&selected_title) {
+                cached
+            } else {
+                let Some(selected) = pick_provider(&selected_title, false).await? else {
+                    continue;
+                };
+                input::save_search_provider(&selected_title, selected);
+                selected
+            };
             save_history(&selected_title);
 
             let input_data = crate::models::Input { title: selected_title, tipe };
@@ -1332,38 +1857,15 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
     Ok(())
 }
 
-async fn handle_watch_mode(discord: &mut Option<DiscordIpcClient>) -> anyhow::Result<()> {
-    loop {
-        clearscreen_and_show_banner()?;
-        let menu_items = [
-            "1. Watch Any Anime / Movie",
-            "2. Watch Last Anime / Movie [Watch & Search History]",
-            "3. Kembali ke Menu Utama",
-        ];
-
-        let choice = dialoguer::Select::with_theme(&crate::util::custom_theme())
-            .with_prompt("Pilih Mode Menonton:")
-            .default(0)
-            .items(&menu_items)
-            .interact()?;
-
-        match choice {
-            0 => {
-                handle_search_and_watch(discord).await?;
-            }
-            1 => {
-                handle_resume_last_watch(discord).await?;
-            }
-            _ => break,
-        }
-    }
-    Ok(())
-}
-
 async fn run_app() -> anyhow::Result<()> {
     crate::util::cleanup_temp_files();
 
-    let mut discord = Some(DiscordIpcClient::new(DISCORD_APP_ID));
+    let config = config::Config::load();
+    let mut discord = if config.rpc && !rpc_disabled() {
+        Some(DiscordIpcClient::new(DISCORD_APP_ID))
+    } else {
+        None
+    };
     if let Some(ref mut drpc) = discord {
         if drpc.connect().is_ok() {
             reset_discord_status(&mut discord);
@@ -1372,41 +1874,71 @@ async fn run_app() -> anyhow::Result<()> {
         }
     }
 
-    if !check_command_exists("mpv") {
-        show_health_screen()?;
+    if let Some(title) = cli_search_title() {
+        let result = run_cli_search(&mut discord, title).await;
+        crate::util::cleanup_temp_files();
+        return result;
+    }
+
+    if cli_resume() {
+        let result = handle_resume_latest(&mut discord).await;
+        crate::util::cleanup_temp_files();
+        return result;
+    }
+
+    if !check_command_exists("mpv") && !show_health_screen()? {
+        crate::util::cleanup_temp_files();
+        return Ok(());
     }
 
     loop {
         clearscreen_and_show_banner()?;
-        let menu_choice = show_main_menu()?;
+        let Some(action) = show_main_menu()? else {
+            crate::util::cleanup_temp_files();
+            println!("\nSampai jumpa lagi!\n");
+            return Ok(());
+        };
 
-        match menu_choice {
-            MENU_UPDATE => {
-                handle_self_update()?;
+        match action {
+            MainAction::Continue => {
+                handle_resume_latest(&mut discord).await?;
             }
-            MENU_WATCH => {
-                handle_watch_mode(&mut discord).await?;
+            MainAction::Search => {
+                handle_search_and_watch(&mut discord).await?;
             }
-            MENU_HEALTH => {
+            MainAction::History => {
+                handle_resume_last_watch(&mut discord).await?;
+            }
+            MainAction::Settings => {
+                handle_settings_menu(&mut discord).await?;
+            }
+            MainAction::Health => {
                 let _ = show_health_screen()?;
             }
-            MENU_EXIT => {
+            MainAction::Update => {
+                handle_self_update()?;
+            }
+            MainAction::Exit => {
                 crate::util::cleanup_temp_files();
                 println!("\nSampai jumpa lagi!\n");
                 return Ok(());
             }
-            _ => break,
         }
     }
-
-    crate::util::cleanup_temp_files();
-    Ok(())
 }
 
 fn main() -> anyhow::Result<()> {
+    let args = parse_args()?;
+    let _ = CLI_ARGS.set(args);
+
     let rt = runtime::Builder::new_multi_thread().enable_all().build()?;
     if let Err(e) = rt.block_on(run_app()) {
-        eprintln!(" {} {}\n", "■".red(), format!("{:#?}", e).yellow());
+        crate::util::cleanup_temp_files();
+        eprintln!("\n{} {:#}", "■".red(), e);
+        eprintln!(
+            "  Coba jalankan lagi, atau buka menu {} untuk memeriksa dependensi.",
+            "Cek kesehatan".cyan()
+        );
         std::process::exit(1);
     }
     Ok(())

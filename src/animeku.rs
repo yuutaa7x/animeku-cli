@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    io::{stdout, Write},
-};
+use std::collections::{HashMap, HashSet};
 
 use colored::Colorize;
 
@@ -78,7 +75,7 @@ fn build_search_menu(
 
     for (index, movie) in movies.into_iter().enumerate() {
         items.push(SearchMenuItem {
-            label: format!("{}. {}", index + 1, movie.title.trim()),
+            label: format!("{}. {}", index + 1, movie),
             action: SearchAction::Select,
             movie: Some(movie),
         });
@@ -111,12 +108,48 @@ fn build_search_menu(
     items
 }
 
+/// Per-title playback state used to add ✔/▶ markers to the episode picker.
+#[derive(Debug, Default)]
+struct EpisodeWatchState {
+    watched: HashSet<String>,
+    last: Option<String>,
+}
+
+impl EpisodeWatchState {
+    fn from_movie(movie_id: &str) -> Self {
+        let history = input::load_watch_history();
+        let mut state = Self::default();
+        for entry in history {
+            if entry.movie.id != movie_id {
+                continue;
+            }
+            if state.last.is_none() {
+                state.last = Some(entry.episode.id.clone());
+            }
+            state.watched.insert(entry.episode.id);
+        }
+        state
+    }
+
+    fn label(&self, episode: &Episode) -> String {
+        let prefix = if self.last.as_deref() == Some(episode.id.as_str()) {
+            "▶ "
+        } else if self.watched.contains(&episode.id) {
+            "✓ "
+        } else {
+            "  "
+        };
+        format!("{}{}", prefix, episode.title.trim())
+    }
+}
+
 /// Build one page of the episode picker. Search and page-navigation entries
 /// are selectable so keyboard navigation can reach them without special cases.
 fn build_episode_menu(
     episodes: &[Episode],
     page: usize,
     total_pages: u64,
+    watch_state: &EpisodeWatchState,
 ) -> (Vec<input::MenuEntry>, Vec<EpisodeAction>) {
     let total_pages = total_pages.max(1);
     let page = page.clamp(1, total_pages as usize);
@@ -160,7 +193,7 @@ fn build_episode_menu(
     let start = (page - 1) * EPISODES_PER_PAGE;
     let end = (start + EPISODES_PER_PAGE).min(episodes.len());
     for (index, episode) in episodes.iter().enumerate().take(end).skip(start) {
-        entries.push(input::MenuEntry::new(episode.title.trim()));
+        entries.push(input::MenuEntry::new(watch_state.label(episode)));
         actions.push(EpisodeAction::Select(index));
     }
 
@@ -171,6 +204,7 @@ fn build_episode_menu(
 /// built-in typing filter makes this the quickest way to jump to episode 900+.
 fn build_episode_search_menu(
     episodes: &[Episode],
+    watch_state: &EpisodeWatchState,
 ) -> (Vec<input::MenuEntry>, Vec<EpisodeAction>) {
     let mut entries = Vec::with_capacity(episodes.len() + 2);
     let mut actions = Vec::with_capacity(episodes.len() + 2);
@@ -181,11 +215,36 @@ fn build_episode_search_menu(
     actions.push(EpisodeAction::Separator);
 
     for (index, episode) in episodes.iter().enumerate() {
-        entries.push(input::MenuEntry::new(episode.title.trim()));
+        entries.push(input::MenuEntry::new(watch_state.label(episode)));
         actions.push(EpisodeAction::Select(index));
     }
 
     (entries, actions)
+}
+
+fn select_episode_globally(
+    episodes: &[Episode],
+    watch_state: &EpisodeWatchState,
+    initial_filter: String,
+) -> anyhow::Result<Option<Episode>> {
+    let (entries, actions) = build_episode_search_menu(episodes, watch_state);
+    let default_index = actions
+        .iter()
+        .position(|action| matches!(action, EpisodeAction::Select(_)))
+        .unwrap_or(0);
+    let config = input::MenuConfig {
+        q_back: true,
+        initial_filter,
+        hint: Some("↑↓ pilih • ketik filter • Backspace hapus • q+Enter/Esc kembali"),
+        ..Default::default()
+    };
+    match input::select_menu_custom("Cari Episode:", &entries, default_index, &config)? {
+        input::MenuResult::Selected(index) => match actions[index] {
+            EpisodeAction::Select(index) => Ok(Some(episodes[index].clone())),
+            _ => Ok(None),
+        },
+        _ => Ok(None),
+    }
 }
 
 impl AnimekuCli {
@@ -218,13 +277,6 @@ impl AnimekuCli {
     }
 
     pub async fn search(&mut self, search_title: &str) -> anyhow::Result<Option<Movie>> {
-        print!(
-            "{} Proses pencarian '{}'.. ",
-            "◆".blue(),
-            search_title.green()
-        );
-        stdout().flush()?;
-
         let mut page = 1usize;
         let mut is_latest = false;
 
@@ -232,10 +284,35 @@ impl AnimekuCli {
             if let std::collections::hash_map::Entry::Vacant(_) =
                 self.movie_cache.entry(page.to_string())
             {
-                let (movie_list, total_pages) =
-                    self.extractor.search(search_title.into(), page).await?;
+                let spinner_message = format!("Mencari '{}'...", search_title);
+                let result = crate::util::with_spinner(
+                    spinner_message,
+                    self.extractor.search(search_title.into(), page),
+                )
+                .await;
+                let (movie_list, total_pages) = match result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        eprintln!(
+                            "{} Gagal mencari '{}': {:#}",
+                            "■".red(),
+                            search_title,
+                            error
+                        );
+                        println!();
+                        println!("Periksa koneksi internet lalu coba lagi.");
+                        println!("Tekan Enter untuk kembali...");
+                        let mut dummy = String::new();
+                        let _ = std::io::stdin().read_line(&mut dummy);
+                        return Ok(None);
+                    }
+                };
                 if page == 1 && !movie_list.is_empty() {
-                    println!("ditemukan {} judul", movie_list.len().to_string().green());
+                    println!(
+                        "{} Ditemukan {} judul",
+                        "✓".green(),
+                        movie_list.len().to_string().green()
+                    );
                 }
                 self.movie_cache
                     .insert(page.to_string(), (movie_list, total_pages.max(1)));
@@ -249,7 +326,7 @@ impl AnimekuCli {
                     eprintln!(
                         "tidak ditemukan!\n{} {}",
                         "■".red(),
-                        "Silahkan periksa kembali kata kunci pencarian\n".yellow()
+                        "Silakan periksa kembali kata kunci pencarian\n".yellow()
                     );
                     println!("Tekan Enter untuk kembali ke pencarian...");
                     let mut dummy = String::new();
@@ -261,6 +338,7 @@ impl AnimekuCli {
                 continue;
             }
 
+            let result_count = page_movies.len();
             let menu = build_search_menu(page_movies, page, total_pages, is_latest);
             // Keep the cursor on the first actual result; "Kembali" and the
             // separators stay non-default so Enter cannot pick them by mistake.
@@ -275,9 +353,39 @@ impl AnimekuCli {
                     _ => input::MenuEntry::new(item.label.clone()),
                 })
                 .collect::<Vec<_>>();
-            let Some(selected) = input::select_menu("Pilih", &entries, default_index)? else {
-                return Ok(None);
+            let prompt = if total_pages > 1 {
+                format!(
+                    "Pilih Judul (Halaman {}/{}, {} hasil):",
+                    page, total_pages, result_count
+                )
+            } else {
+                format!("Pilih Judul ({} hasil):", result_count)
             };
+            let config = input::MenuConfig {
+                page_keys: true,
+                q_back: true,
+                hint: Some("↑↓ pilih • ←/→ halaman • ketik filter • q+Enter/Esc kembali"),
+                ..Default::default()
+            };
+            let selected =
+                match input::select_menu_custom(&prompt, &entries, default_index, &config)? {
+                    input::MenuResult::Selected(index) => index,
+                    input::MenuResult::PreviousPage => {
+                        if page > 1 {
+                            page -= 1;
+                        }
+                        continue;
+                    }
+                    input::MenuResult::NextPage => {
+                        if !is_latest && (page as u64) < total_pages {
+                            page += 1;
+                        }
+                        continue;
+                    }
+                    input::MenuResult::SearchFilter(_) | input::MenuResult::Cancelled => {
+                        return Ok(None);
+                    }
+                };
             let item = match menu.into_iter().nth(selected) {
                 Some(item) => item,
                 None => continue,
@@ -298,24 +406,33 @@ impl AnimekuCli {
     }
 
     pub async fn extract_episode(&mut self, movie: Movie) -> anyhow::Result<Option<Episode>> {
-        print!(
-            "{} Memuat daftar episode '{}' .. ",
-            "◆".blue(),
-            movie.title.trim().green()
-        );
-        stdout().flush()?;
-
         let id = movie.id.clone();
+        let watch_state = EpisodeWatchState::from_movie(&id);
+        let spinner_message = format!("Memuat daftar episode '{}'...", movie.title.trim());
 
         if !self.episode_cache.contains_key(&id) {
-            let item = self.extractor.get_episodes(movie).await?;
-            self.episode_cache.insert(id.clone(), item);
+            let result =
+                crate::util::with_spinner(spinner_message, self.extractor.get_episodes(movie))
+                    .await;
+            match result {
+                Ok(item) => {
+                    self.episode_cache.insert(id.clone(), item);
+                }
+                Err(error) => {
+                    eprintln!("{} Gagal memuat episode: {:#}", "■".red(), error);
+                    println!();
+                    println!("Tekan Enter untuk kembali ke daftar judul...");
+                    let mut dummy = String::new();
+                    let _ = std::io::stdin().read_line(&mut dummy);
+                    return Ok(None);
+                }
+            }
         }
 
         let (episodes, meta) = self.episode_cache.get(&id).unwrap().to_owned();
         if episodes.is_empty() {
             eprintln!(
-                "tidak berhasil!\n{} {}",
+                "{} {}",
                 "■".red(),
                 "Daftar episode tidak tersedia untuk judul ini.\n".yellow()
             );
@@ -325,15 +442,17 @@ impl AnimekuCli {
             return Ok(None);
         }
 
-        println!("berhasil");
+        println!("{} Daftar episode dimuat", "✓".green());
         println!(
             "\n  {}{}\n",
             " ".repeat(45 / 2 - 5),
             " Deskripsi ".black().on_truecolor(252, 136, 3)
         );
 
-        if let Some(ref thumb_url) = meta.thumb_url {
-            show_image_thumb(thumb_url.to_string()).await;
+        if crate::config::Config::load().show_posters {
+            if let Some(ref thumb_url) = meta.thumb_url {
+                show_image_thumb(thumb_url.to_string()).await;
+            }
         }
 
         let mut has_episode = false;
@@ -358,7 +477,7 @@ impl AnimekuCli {
         let mut page = 1usize;
 
         loop {
-            let (entries, actions) = build_episode_menu(&episodes, page, total_pages);
+            let (entries, actions) = build_episode_menu(&episodes, page, total_pages, &watch_state);
             let default_index = actions
                 .iter()
                 .position(|action| matches!(action, EpisodeAction::Select(_)))
@@ -379,6 +498,13 @@ impl AnimekuCli {
                     page = (page + 1).min(total_pages as usize);
                     continue;
                 }
+                input::MenuResult::SearchFilter(query) => {
+                    if let Some(episode) = select_episode_globally(&episodes, &watch_state, query)?
+                    {
+                        return Ok(Some(episode));
+                    }
+                    continue;
+                }
                 input::MenuResult::Cancelled => return Ok(None),
             };
 
@@ -391,21 +517,10 @@ impl AnimekuCli {
                     page = (page + 1).min(total_pages as usize);
                 }
                 EpisodeAction::Search => {
-                    let (search_entries, search_actions) = build_episode_search_menu(&episodes);
-                    let search_default = search_actions
-                        .iter()
-                        .position(|action| matches!(action, EpisodeAction::Select(_)))
-                        .unwrap_or(0);
-                    let Some(search_selected) = input::select_menu(
-                        "Cari Episode:",
-                        &search_entries,
-                        search_default,
-                    )? else {
-                        continue;
-                    };
-                    match search_actions[search_selected] {
-                        EpisodeAction::Select(index) => return Ok(Some(episodes[index].clone())),
-                        _ => continue,
+                    if let Some(episode) =
+                        select_episode_globally(&episodes, &watch_state, String::new())?
+                    {
+                        return Ok(Some(episode));
                     }
                 }
                 EpisodeAction::Separator => {}
@@ -414,24 +529,36 @@ impl AnimekuCli {
         }
     }
 
-    pub async fn extract_stream_urls(&mut self, episode: Episode) -> anyhow::Result<Option<Stream>> {
-        print!(
-            "{} Memuat server stream '{}' .. ",
-            "◆".blue(),
-            episode.title.trim().green()
-        );
-        stdout().flush()?;
-
+    pub async fn extract_stream_urls(
+        &mut self,
+        episode: Episode,
+    ) -> anyhow::Result<Option<Stream>> {
         let id = episode.id.clone();
+        let spinner_message = format!("Memuat server stream '{}'...", episode.title.trim());
+
         if !self.stream_cache.contains_key(&id) {
-            let streams = self.extractor.get_stream_urls(episode).await?;
-            self.stream_cache.insert(id.clone(), streams);
+            let result =
+                crate::util::with_spinner(spinner_message, self.extractor.get_stream_urls(episode))
+                    .await;
+            match result {
+                Ok(streams) => {
+                    self.stream_cache.insert(id.clone(), streams);
+                }
+                Err(error) => {
+                    eprintln!("{} Gagal memuat server stream: {:#}", "■".red(), error);
+                    println!();
+                    println!("Tekan Enter untuk kembali...");
+                    let mut dummy = String::new();
+                    let _ = std::io::stdin().read_line(&mut dummy);
+                    return Ok(None);
+                }
+            }
         }
 
         let streams = self.stream_cache.get(&id).unwrap().to_owned();
         if streams.is_empty() {
             eprintln!(
-                "gagal!\n{} {}",
+                "{} {}",
                 "■".red(),
                 "Server stream tidak ditemukan atau sedang offline.\n".yellow()
             );
@@ -440,14 +567,16 @@ impl AnimekuCli {
             let _ = std::io::stdin().read_line(&mut dummy);
             return Ok(None);
         }
-        println!("berhasil");
+        println!("{} Server stream dimuat", "✓".green());
 
         let mut opts = streams;
         opts.push(Stream {
             url: "0".into(),
             title: "[ Kembali ke Pilih Episode ]".into(),
         });
-        let selected = input::choice(opts, false)?;
+        let Some(selected) = input::choice("Pilih Server / Kualitas:", opts, 0)? else {
+            return Ok(None);
+        };
         if selected.url == "0" {
             Ok(None)
         } else {
@@ -646,7 +775,8 @@ mod tests {
         let total_pages = episodes.len().div_ceil(EPISODES_PER_PAGE) as u64;
         assert_eq!(total_pages, 2);
 
-        let (_, first_page) = build_episode_menu(&episodes, 1, total_pages);
+        let state = EpisodeWatchState::default();
+        let (_, first_page) = build_episode_menu(&episodes, 1, total_pages, &state);
         assert_eq!(first_page[0], EpisodeAction::Back);
         assert_eq!(first_page[1], EpisodeAction::Search);
         assert!(first_page.contains(&EpisodeAction::Select(0)));
@@ -662,7 +792,7 @@ mod tests {
             EPISODES_PER_PAGE
         );
 
-        let (_, last_page) = build_episode_menu(&episodes, 2, total_pages);
+        let (_, last_page) = build_episode_menu(&episodes, 2, total_pages, &state);
         assert!(last_page.contains(&EpisodeAction::Select(25)));
         assert!(last_page.contains(&EpisodeAction::Select(29)));
         assert!(!last_page.contains(&EpisodeAction::Select(24)));
@@ -679,7 +809,8 @@ mod tests {
 
     #[test]
     fn single_page_episode_menu_has_no_search_or_navigation() {
-        let (_, actions) = build_episode_menu(&episode_list(5), 1, 1);
+        let state = EpisodeWatchState::default();
+        let (_, actions) = build_episode_menu(&episode_list(5), 1, 1, &state);
         assert!(!actions.contains(&EpisodeAction::Search));
         assert!(!actions.contains(&EpisodeAction::Previous));
         assert!(!actions.contains(&EpisodeAction::Next));
@@ -695,7 +826,8 @@ mod tests {
     #[test]
     fn episode_search_menu_contains_every_episode() {
         let episodes = episode_list(30);
-        let (_, actions) = build_episode_search_menu(&episodes);
+        let state = EpisodeWatchState::default();
+        let (_, actions) = build_episode_search_menu(&episodes, &state);
         assert_eq!(actions[0], EpisodeAction::Back);
         assert!(actions.contains(&EpisodeAction::Select(0)));
         assert!(actions.contains(&EpisodeAction::Select(29)));

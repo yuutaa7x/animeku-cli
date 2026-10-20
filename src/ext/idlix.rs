@@ -49,7 +49,7 @@ fn check_curl_available() -> anyhow::Result<()> {
     if !ok {
         anyhow::bail!(
             "curl tidak ditemukan di sistem.\n\
-             Streaming Idlix memerlukan curl. Silahkan install:\n\
+             Streaming Idlix memerlukan curl. Silakan install:\n\
              - Linux  : sudo apt install curl  /  sudo pacman -S curl  /  pkg install curl (Termux)\n\
              - macOS  : brew install curl\n\
              - Windows: curl sudah tersedia di Windows 10 1803+. Pastikan Windows kamu sudah diperbarui.\n\
