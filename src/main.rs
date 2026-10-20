@@ -3,6 +3,7 @@ use std::io::{stdout, Write};
 use std::process::Command;
 use animeku::AnimekuCli;
 use colored::Colorize;
+use ext::otakudesu::{OTAKUDESU_REFERER, OTAKUDESU_USER_AGENT};
 use ext::Ext;
 use tokio::runtime;
 
@@ -97,10 +98,8 @@ fn check_command_exists(cmd: &str) -> bool {
         }
     }
 
-    if cfg!(target_os = "windows") {
-        if check_windows_known_paths(cmd) {
-            return true;
-        }
+    if cfg!(target_os = "windows") && check_windows_known_paths(cmd) {
+        return true;
     }
 
     false
@@ -241,46 +240,46 @@ fn install_dependencies(package_manager: &str) {
     match package_manager {
         "apt-get" => {
             let _ = Command::new("sudo")
-                .args(&["apt-get", "install", "-y", "mpv", "yt-dlp"])
+                .args(["apt-get", "install", "-y", "mpv", "yt-dlp"])
                 .status();
         },
         "pacman" => {
             let _ = Command::new("sudo")
-                .args(&["pacman", "-S", "--noconfirm", "mpv", "yt-dlp"])
+                .args(["pacman", "-S", "--noconfirm", "mpv", "yt-dlp"])
                 .status();
         },
         "dnf" => {
             let _ = Command::new("sudo")
-                .args(&["dnf", "install", "-y", "mpv", "yt-dlp"])
+                .args(["dnf", "install", "-y", "mpv", "yt-dlp"])
                 .status();
         },
         "zypper" => {
             let _ = Command::new("sudo")
-                .args(&["zypper", "install", "-y", "mpv", "yt-dlp"])
+                .args(["zypper", "install", "-y", "mpv", "yt-dlp"])
                 .status();
         },
         "apk" => {
             let _ = Command::new("sudo")
-                .args(&["apk", "add", "mpv", "yt-dlp"])
+                .args(["apk", "add", "mpv", "yt-dlp"])
                 .status();
         },
         "pkg" => {
             // Termux (Android) — tidak butuh sudo
             println!("  {} Menjalankan: pkg install mpv yt-dlp ...", "ℹ".yellow());
             let _ = Command::new("pkg")
-                .args(&["install", "-y", "mpv", "yt-dlp"])
+                .args(["install", "-y", "mpv", "yt-dlp"])
                 .status();
         },
         "brew" => {
             let _ = Command::new("brew")
-                .args(&["install", "mpv", "yt-dlp"])
+                .args(["install", "mpv", "yt-dlp"])
                 .status();
         },
         "winget" => {
             let winget_bin = resolve_command_path("winget");
             println!("  {} Menjalankan: winget install --id shinchiro.mpv --source winget ...", "ℹ".yellow());
             let status1 = Command::new(&winget_bin)
-                .args(&["install", "--id", "shinchiro.mpv", "-e", "--source", "winget", "--accept-source-agreements", "--accept-package-agreements"])
+                .args(["install", "--id", "shinchiro.mpv", "-e", "--source", "winget", "--accept-source-agreements", "--accept-package-agreements"])
                 .status();
 
             let mpv_ok = match status1 {
@@ -288,7 +287,7 @@ fn install_dependencies(package_manager: &str) {
                 _ => {
                     println!("  {} Mencoba alternatif: winget install --id mpv.net --source winget ...", "ℹ".yellow());
                     let s2 = Command::new(&winget_bin)
-                        .args(&["install", "--id", "mpv.net", "-e", "--source", "winget", "--accept-source-agreements", "--accept-package-agreements"])
+                        .args(["install", "--id", "mpv.net", "-e", "--source", "winget", "--accept-source-agreements", "--accept-package-agreements"])
                         .status();
                     s2.map(|s| s.success()).unwrap_or(false)
                 }
@@ -302,21 +301,21 @@ fn install_dependencies(package_manager: &str) {
 
             println!("  {} Menjalankan: winget install --id yt-dlp.yt-dlp --source winget ...", "ℹ".yellow());
             let _ = Command::new(&winget_bin)
-                .args(&["install", "--id", "yt-dlp.yt-dlp", "-e", "--source", "winget", "--accept-source-agreements", "--accept-package-agreements"])
+                .args(["install", "--id", "yt-dlp.yt-dlp", "-e", "--source", "winget", "--accept-source-agreements", "--accept-package-agreements"])
                 .status();
         },
         "choco" => {
             let choco_bin = resolve_command_path("choco");
             println!("  {} Menjalankan: choco install -y mpv yt-dlp ...", "ℹ".yellow());
             let _ = Command::new(&choco_bin)
-                .args(&["install", "-y", "mpv", "yt-dlp"])
+                .args(["install", "-y", "mpv", "yt-dlp"])
                 .status();
         },
         "scoop" => {
             let scoop_bin = resolve_command_path("scoop");
             println!("  {} Menjalankan: scoop install mpv yt-dlp ...", "ℹ".yellow());
             let _ = Command::new(&scoop_bin)
-                .args(&["install", "mpv", "yt-dlp"])
+                .args(["install", "mpv", "yt-dlp"])
                 .status();
         },
         _ => {},
@@ -353,23 +352,23 @@ fn show_health_screen() -> anyhow::Result<bool> {
         
         let has_mpv = check_command_exists("mpv");
         if has_mpv {
-            println!("  {}  {}", "[✓ INSTALLED]".bright_green(), "MPV Video Player");
+            println!("  {}  MPV Video Player", "[✓ INSTALLED]".bright_green());
         } else {
-            println!("  {}  {}", "[✗ NOT FOUND]".bright_red(), "MPV Video Player");
+            println!("  {}  MPV Video Player", "[✗ NOT FOUND]".bright_red());
             println!("    {} {}", "↳".bright_yellow(), "Terminal playback is a NO GO (Browser playback only)".bright_yellow());
         }
         println!();
         
         let has_ytdlp = check_command_exists("yt-dlp") || check_command_exists("youtube-dl");
         if has_ytdlp {
-            println!("  {}  {}", "[✓ INSTALLED]".bright_green(), "yt-dlp / youtube-dl");
+            println!("  {}  yt-dlp / youtube-dl", "[✓ INSTALLED]".bright_green());
         } else {
-            println!("  {}  {}", "[- OPTIONAL ]".bright_yellow(), "yt-dlp / youtube-dl");
+            println!("  {}  yt-dlp / youtube-dl", "[- OPTIONAL ]".bright_yellow());
             println!("    {} {}", "↳".bright_black(), "Fallback extraction disabled".bright_black());
         }
         println!();
         
-        println!("  {}  {}", "[✓ BUILT-IN ]".bright_cyan(), "Native Rust Scraper (Idlix Animation)");
+        println!("  {}  Native Rust Scraper (Idlix Animation)", "[✓ BUILT-IN ]".bright_cyan());
         println!();
         
         println!("  {}", "------------------------------------------------------------------".bright_white());
@@ -528,7 +527,7 @@ fn format_episode(title: &str, is_series: bool, season_num: u32) -> String {
         };
     }
     
-    if trimmed.chars().all(|c| c.is_digit(10)) {
+    if trimmed.chars().all(|c| c.is_ascii_digit()) {
         return if season_num > 1 {
             format!("Season {} • Episode {}", season_num, trimmed)
         } else {
@@ -580,7 +579,7 @@ fn update_discord_status(
     let _ = drpc.set_activity(
         activity::Activity::new()
             .details(&clean_movie)
-            .state(&format_episode(&clean_ep, is_series, season_num))
+            .state(format_episode(&clean_ep, is_series, season_num))
             .assets(assets)
             .timestamps(activity::Timestamps::new().start(current_timestamp))
             .activity_type(activity::ActivityType::Watching),
@@ -599,7 +598,7 @@ fn reset_discord_status(discord: &mut Option<DiscordIpcClient>) {
 }
 
 async fn execute_player(stream_url: &str, provider_type: usize, start_seconds: u64) -> anyhow::Result<u64> {
-    print!("{} Membuka tautan diaplikasi eksternal .. \n", "◆".blue());
+    println!("{} Membuka tautan diaplikasi eksternal .. ", "◆".blue());
     stdout().flush()?;
 
     let is_android = std::env::var("TERMUX_VERSION").is_ok();
@@ -702,8 +701,12 @@ mp.register_event("shutdown", save)
                     cmd.arg(format!("--sub-file={}", sub_file));
                 }
             } else if provider_type == PROVIDER_OTAKUDESU {
-                cmd.arg("--http-header-fields=Referer: https://desustream.net/");
-                cmd.arg("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36");
+                cmd.arg(format!("--http-header-fields=Referer: {}", OTAKUDESU_REFERER));
+                cmd.arg(format!("--user-agent={}", OTAKUDESU_USER_AGENT));
+                // Otakudesu gives direct MP4/Google Video URLs. Let mpv handle
+                // them natively instead of invoking yt-dlp's generic extractor,
+                // which fails with 403 on these signed URLs.
+                cmd.arg("--ytdl=no");
             }
             if let Ok(status) = cmd.arg(stream_url).status() {
                 if !status.success() {
@@ -734,14 +737,24 @@ mp.register_event("shutdown", save)
                 }
 
                 // Kita nyalakan Local HTTP Proxy untuk memanipulasi Header!
-                let proxy_port = crate::proxy::start_proxy(provider_type).await.unwrap_or(8080);
+                // Handle ini menjaga listener tetap hidup selama playback dan
+                // otomatis menghentikannya saat keluar dari blok ini.
+                let proxy = match crate::proxy::start_proxy(provider_type).await {
+                    Ok(handle) => handle,
+                    Err(e) => {
+                        eprintln!("{} Gagal menjalankan proxy lokal: {}", "■".red(), e);
+                        std::thread::sleep(std::time::Duration::from_secs(3));
+                        return Ok(final_pos);
+                    }
+                };
+                let proxy_port = proxy.port;
                 let encoded_url = urlencoding::encode(stream_url);
                 let proxy_url = format!("http://127.0.0.1:{}/?url={}", proxy_port, encoded_url);
 
                 // Buka menggunakan termux-open dengan MIME video/* 
                 // Karena kita pakai http://127.0.0.1, VLC tidak butuh Header lagi, Proxy yang urus!
                 let status = Command::new("termux-open")
-                    .args(&["--content-type", "video/*", "--chooser", &proxy_url])
+                    .args(["--content-type", "video/*", "--chooser", &proxy_url])
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status();
@@ -774,8 +787,8 @@ mp.register_event("shutdown", save)
                     cmd.arg(format!("--start-time={}", start_seconds));
                 }
                 if provider_type == PROVIDER_OTAKUDESU {
-                    cmd.arg("--http-referrer=https://desustream.net/");
-                    cmd.arg("--http-user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36");
+                    cmd.arg(format!("--http-referrer={}", OTAKUDESU_REFERER));
+                    cmd.arg(format!("--http-user-agent={}", OTAKUDESU_USER_AGENT));
                 }
                 if let Ok(status) = cmd.arg(stream_url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status() {
                     if !status.success() { eprintln!("{} Gagal memutar video di VLC", "■".red()); }
@@ -831,14 +844,101 @@ fn extract_ep_num(title: &str) -> u32 {
     last_num
 }
 
+/// Parse season and episode numbers from common provider title formats:
+/// `S1E01`, `S01E01`, `Season 2 Episode 5`, `Season 2 Ep 5`.
+fn parse_season_episode(title: &str) -> Option<(u32, u32)> {
+    let sxe = regex::Regex::new(r"(?i)\bS(\d{1,2})\s*E(\d{1,4})\b").unwrap();
+    if let Some(caps) = sxe.captures(title) {
+        if let (Ok(season), Ok(episode)) = (caps[1].parse(), caps[2].parse()) {
+            return Some((season, episode));
+        }
+    }
+
+    let long = regex::Regex::new(
+        r"(?i)\bSeason\s*(\d{1,2})\s*(?:[-:•]\s*)?(?:Episode|Ep|E)\s*(\d{1,4})\b",
+    )
+    .unwrap();
+    if let Some(caps) = long.captures(title) {
+        if let (Ok(season), Ok(episode)) = (caps[1].parse(), caps[2].parse()) {
+            return Some((season, episode));
+        }
+    }
+
+    None
+}
+
+/// Detect a season number using only titles. Returns `None` when the titles
+/// carry no season information at all.
+fn detect_season_from_titles(movie_title: &str, episode_title: &str) -> Option<u32> {
+    parse_season_episode(episode_title)
+        .map(|(season, _)| season)
+        .or_else(|| detect_season(episode_title, "", &[]))
+        .or_else(|| detect_season(movie_title, "", &[]))
+}
+
+/// Best-effort season detection for a concrete episode. Provider titles like
+/// `S2E05` are authoritative; provider metadata is only a fallback. Missing
+/// information defaults to season 1 instead of interrupting the user.
+fn detect_season_for_episode(
+    animeku: &AnimekuCli,
+    movie: &crate::models::Movie,
+    episode: &crate::models::Episode,
+) -> u32 {
+    if !episode.is_series {
+        return 1;
+    }
+
+    if let Some(season) = detect_season_from_titles(&movie.title, &episode.title) {
+        return season;
+    }
+
+    let meta_opt = animeku.get_meta(&movie.id);
+    let thumb = meta_opt
+        .as_ref()
+        .and_then(|m| m.thumb_url.clone())
+        .unwrap_or_default();
+    let meta_data = meta_opt.map(|m| m.data).unwrap_or_default();
+    detect_season(&movie.title, &thumb, &meta_data).unwrap_or(1)
+}
+
+/// Pick the next episode from the provider's ordered list. List order handles
+/// season boundaries correctly (`S1E12` -> `S2E01`), unlike a global
+/// "episode number + 1" search which can jump back to an earlier season.
+fn find_next_episode<'a>(
+    episodes: &'a [crate::models::Episode],
+    current: &crate::models::Episode,
+) -> Option<&'a crate::models::Episode> {
+    if let Some(index) = episodes.iter().position(|e| e.id == current.id) {
+        if let Some(next) = episodes.get(index + 1) {
+            return Some(next);
+        }
+    }
+
+    if let Some((season, episode)) = parse_season_episode(&current.title) {
+        return episodes.iter().find(|e| {
+            matches!(
+                parse_season_episode(&e.title),
+                Some((s, n)) if (s == season && n == episode + 1) || (s == season + 1 && n == 1)
+            )
+        });
+    }
+
+    let current_num = extract_ep_num(&current.title);
+    if current_num > 0 {
+        return episodes
+            .iter()
+            .find(|e| extract_ep_num(&e.title) == current_num + 1);
+    }
+
+    None
+}
+
 async fn handle_movie_episodes(
     animeku: &mut AnimekuCli,
     movie: &crate::models::Movie,
     provider_type: usize,
     discord: &mut Option<DiscordIpcClient>,
 ) -> anyhow::Result<()> {
-    let mut cached_season: Option<u32> = None;
-
     loop {
         clearscreen_and_show_banner()?;
         let mut episode = match animeku.extract_episode(movie.clone()).await? {
@@ -847,30 +947,7 @@ async fn handle_movie_episodes(
         };
 
         loop {
-            let season_num = match cached_season {
-                Some(s) => s,
-                None => {
-                    let detected = if episode.is_series {
-                        let meta_opt = animeku.get_meta(&movie.id);
-                        let thumb = meta_opt.clone().and_then(|m| m.thumb_url).unwrap_or_default();
-                        let meta_data = meta_opt.map(|m| m.data).unwrap_or_default();
-                        if let Some(s) = detect_season(&movie.title, &thumb, &meta_data) {
-                            s
-                        } else {
-                            let answer: String = dialoguer::Input::with_theme(&crate::util::custom_theme())
-                                .with_prompt("Sistem gagal mendeteksi Season. Ini Season berapa? (Kosongkan jika S1)")
-                                .allow_empty(true)
-                                .interact_text()
-                                .unwrap_or_default();
-                            answer.trim().parse::<u32>().unwrap_or(1)
-                        }
-                    } else {
-                        1
-                    };
-                    cached_season = Some(detected);
-                    detected
-                }
-            };
+            let season_num = detect_season_for_episode(animeku, movie, &episode);
 
             // Stream selection & playback
             clearscreen_and_show_banner()?;
@@ -896,14 +973,11 @@ async fn handle_movie_episodes(
             
             reset_discord_status(discord);
 
-            // Auto-next logic
-            let mut next_ep_opt = None;
-            if let Some(episodes) = animeku.get_episode_list(&movie.id) {
-                let current_num = extract_ep_num(&episode.title);
-                if current_num > 0 {
-                    next_ep_opt = episodes.iter().find(|e| extract_ep_num(&e.title) == current_num + 1).cloned();
-                }
-            }
+            // Auto-next logic: follow the provider's ordered episode list so
+            // the last episode of a season advances to the next season.
+            let next_ep_opt = animeku
+                .get_episode_list(&movie.id)
+                .and_then(|episodes| find_next_episode(&episodes, &episode).cloned());
 
             if let Some(next_ep) = next_ep_opt {
                 let confirm = dialoguer::Confirm::with_theme(&crate::util::custom_theme())
@@ -941,13 +1015,57 @@ fn show_main_menu() -> anyhow::Result<usize> {
     Ok(choice)
 }
 
+/// Return the source checkout only when the current directory is actually this
+/// project. Checking for a bare `.git` in the working directory is dangerous:
+/// running the installed binary from any other repository would otherwise run
+/// `git pull` and `cargo install --path .` inside that unrelated project.
+fn local_update_repo() -> Option<std::path::PathBuf> {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .canonicalize()
+        .ok()?;
+    let cwd = std::env::current_dir().ok()?.canonicalize().ok()?;
+
+    if !cwd.starts_with(&manifest) || !manifest.join(".git").exists() {
+        return None;
+    }
+
+    let cargo_toml = std::fs::read_to_string(manifest.join("Cargo.toml")).ok()?;
+    let is_this_package = cargo_toml
+        .lines()
+        .any(|line| line.trim() == "name = \"animeku-cli\"");
+    if !is_this_package {
+        return None;
+    }
+
+    Some(manifest)
+}
+
 fn handle_self_update() -> anyhow::Result<()> {
     clearscreen_and_show_banner()?;
     println!("{} Memeriksa dan mengunduh pembaruan...", "◆".blue());
     println!("  Repository: {}\n", REPO_URL.cyan());
 
     let bin_name = if cfg!(target_os = "windows") { "animeku-cli.exe" } else { "animeku-cli" };
-    let is_git_repo = std::path::Path::new(".git").exists();
+    let local_repo = local_update_repo();
+
+    // Check requirements before touching the executable, otherwise an early
+    // return on Windows would leave the binary renamed to `.exe.old`.
+    if local_repo.is_some() && !check_command_exists("git") {
+        println!("\n  {} git tidak ditemukan di PATH.", "■".red());
+        println!("  Silahkan install git terlebih dahulu, lalu jalankan ulang update ini.");
+        println!("\nTekan Enter untuk kembali ke menu...");
+        let mut dummy = String::new();
+        let _ = std::io::stdin().read_line(&mut dummy);
+        return Ok(());
+    }
+    if !check_command_exists("cargo") {
+        println!("\n  {} cargo / Rust toolchain tidak ditemukan di PATH.", "■".red());
+        println!("  Install Rust dari https://rustup.rs/ lalu jalankan ulang update ini.");
+        println!("\nTekan Enter untuk kembali ke menu...");
+        let mut dummy = String::new();
+        let _ = std::io::stdin().read_line(&mut dummy);
+        return Ok(());
+    }
 
     // On Windows, rename running executable before cargo install to avoid file locking
     let mut renamed_old: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
@@ -961,37 +1079,14 @@ fn handle_self_update() -> anyhow::Result<()> {
         }
     }
 
-    let status = if is_git_repo {
-        if !check_command_exists("git") {
-            println!("\n  {} git tidak ditemukan di PATH.", "■".red());
-            println!("  Silahkan install git terlebih dahulu, lalu jalankan ulang update ini.");
-            println!("\nTekan Enter untuk kembali ke menu...");
-            let mut dummy = String::new();
-            let _ = std::io::stdin().read_line(&mut dummy);
-            return Ok(());
-        }
-        if !check_command_exists("cargo") {
-            println!("\n  {} cargo / Rust toolchain tidak ditemukan di PATH.", "■".red());
-            println!("  Install Rust dari https://rustup.rs/ lalu jalankan ulang update ini.");
-            println!("\nTekan Enter untuk kembali ke menu...");
-            let mut dummy = String::new();
-            let _ = std::io::stdin().read_line(&mut dummy);
-            return Ok(());
-        }
-        println!("{} Terdeteksi repositori lokal. Menjalankan git pull & cargo install...", "ℹ".yellow());
-        let _ = Command::new("git").args(["pull", "origin", "main"]).status();
+    let status = if let Some(repo) = local_repo.as_ref() {
+        println!("{} Terdeteksi source checkout lokal di {}. Menjalankan git pull & cargo install...", "ℹ".yellow(), repo.display());
+        let _ = Command::new("git").args(["pull", "origin", "main"]).current_dir(repo).status();
         Command::new("cargo")
             .args(["install", "--path", ".", "--force"])
+            .current_dir(repo)
             .status()
     } else {
-        if !check_command_exists("cargo") {
-            println!("\n  {} cargo / Rust toolchain tidak ditemukan di PATH.", "■".red());
-            println!("  Install Rust dari https://rustup.rs/ lalu jalankan ulang update ini.");
-            println!("\nTekan Enter untuk kembali ke menu...");
-            let mut dummy = String::new();
-            let _ = std::io::stdin().read_line(&mut dummy);
-            return Ok(());
-        }
         println!("{} Mengunduh dan mengompilasi dari GitHub...", "◆".blue());
         Command::new("cargo")
             .args(["install", "--git", REPO_URL, "--force"])
@@ -1158,7 +1253,11 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
             clearscreen_and_show_banner()?;
 
             let season_num = if selected_watch.episode.is_series {
-                detect_season(&selected_watch.movie.title, "", &[]).unwrap_or(1)
+                detect_season_from_titles(
+                    &selected_watch.movie.title,
+                    &selected_watch.episode.title,
+                )
+                .unwrap_or(1)
             } else {
                 1
             };
@@ -1307,11 +1406,10 @@ async fn run_app() -> anyhow::Result<()> {
 
 fn main() -> anyhow::Result<()> {
     let rt = runtime::Builder::new_multi_thread().enable_all().build()?;
-    rt.block_on(async {
-        if let Err(e) = run_app().await {
-            println!(" {} {}\n", "■".red(), format!("{:#?}", e).yellow());
-        }
-    });
+    if let Err(e) = rt.block_on(run_app()) {
+        eprintln!(" {} {}\n", "■".red(), format!("{:#?}", e).yellow());
+        std::process::exit(1);
+    }
     Ok(())
 }
 
@@ -1330,6 +1428,52 @@ mod main_tests {
         let p = idlix_audio_path();
         assert!(p.contains("animeku_idlix_audio.m3u8"));
         assert!(!p.contains('\\'));
+    }
+
+    #[test]
+    fn test_parse_season_episode() {
+        assert_eq!(
+            parse_season_episode("S1E01 - To You in 2016"),
+            Some((1, 1))
+        );
+        assert_eq!(parse_season_episode("S02E13 - Crossing"), Some((2, 13)));
+        assert_eq!(
+            parse_season_episode("Season 3 Episode 7 - Reunion"),
+            Some((3, 7))
+        );
+        assert_eq!(parse_season_episode("Episode 5"), None);
+        assert_eq!(parse_season_episode("Takopii no Genzai Episode 1"), None);
+    }
+
+    #[test]
+    fn test_find_next_episode_across_seasons() {
+        let episodes = vec![
+            crate::models::Episode {
+                id: "s1e12".to_string(),
+                title: "S1E12 - Finale".to_string(),
+                is_series: true,
+            },
+            crate::models::Episode {
+                id: "s2e01".to_string(),
+                title: "S2E01 - New Beginning".to_string(),
+                is_series: true,
+            },
+            crate::models::Episode {
+                id: "s2e02".to_string(),
+                title: "S2E02 - Next".to_string(),
+                is_series: true,
+            },
+        ];
+
+        assert_eq!(
+            find_next_episode(&episodes, &episodes[0]).map(|e| e.id.as_str()),
+            Some("s2e01")
+        );
+        assert_eq!(
+            find_next_episode(&episodes, &episodes[1]).map(|e| e.id.as_str()),
+            Some("s2e02")
+        );
+        assert!(find_next_episode(&episodes, &episodes[2]).is_none());
     }
 }
 

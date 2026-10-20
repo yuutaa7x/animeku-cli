@@ -11,7 +11,24 @@ use crate::{
     models::{Episode, Meta, Movie, Stream},
 };
 
-const CHROME_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+use crate::ext::CHROME_USER_AGENT;
+
+/// Default Idlix gateway. Can be overridden at runtime with
+/// `ANIMEKU_IDLIX_BASE_URL` when the site rotates domains.
+pub const IDLIX_BASE_URL: &str = "https://z2.idlixku.com";
+
+pub fn idlix_base_url() -> String {
+    std::env::var("ANIMEKU_IDLIX_BASE_URL")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| IDLIX_BASE_URL.to_string())
+}
+
+pub fn idlix_referer() -> String {
+    format!("{}/", idlix_base_url())
+}
+
 fn cookie_cache_path() -> String { crate::util::temp_file("animeku_idlix_cookies.txt") }
 fn audio_playlist_path() -> String { crate::util::temp_file("animeku_idlix_audio.m3u8") }
 fn subtitle_file_path() -> String {
@@ -45,18 +62,28 @@ fn check_curl_available() -> anyhow::Result<()> {
 fn curl_get(url: &str) -> anyhow::Result<String> {
     check_curl_available()?;
     let cookie_path = cookie_cache_path();
-    let output = Command::new("curl")
-        .args([
-            "-s",
-            "-A", CHROME_USER_AGENT,
-            "-H", "Accept: application/json",
-            "-H", "Origin: https://z2.idlixku.com",
-            "-H", "Referer: https://z2.idlixku.com/",
-            "-b", &cookie_path,
-            "-c", &cookie_path,
-            url,
-        ])
-        .output()?;
+    let _ = crate::util::ensure_private_file(&cookie_path);
+    let args = vec![
+        "-s".to_string(),
+        "--connect-timeout".to_string(),
+        "10".to_string(),
+        "--max-time".to_string(),
+        "30".to_string(),
+        "-A".to_string(),
+        CHROME_USER_AGENT.to_string(),
+        "-H".to_string(),
+        "Accept: application/json".to_string(),
+        "-H".to_string(),
+        format!("Origin: {}", idlix_base_url()),
+        "-H".to_string(),
+        format!("Referer: {}", idlix_referer()),
+        "-b".to_string(),
+        cookie_path.clone(),
+        "-c".to_string(),
+        cookie_path,
+        url.to_string(),
+    ];
+    let output = Command::new("curl").args(&args).output()?;
 
     if !output.status.success() {
         anyhow::bail!("Curl request failed with status: {}", output.status);
@@ -68,21 +95,34 @@ fn curl_get(url: &str) -> anyhow::Result<String> {
 fn curl_post(url: &str, body: &Value) -> anyhow::Result<String> {
     check_curl_available()?;
     let cookie_path = cookie_cache_path();
-    let output = Command::new("curl")
-        .args([
-            "-s",
-            "-X", "POST",
-            "-A", CHROME_USER_AGENT,
-            "-H", "Accept: application/json",
-            "-H", "Content-Type: application/json",
-            "-H", "Origin: https://z2.idlixku.com",
-            "-H", "Referer: https://z2.idlixku.com/",
-            "-b", &cookie_path,
-            "-c", &cookie_path,
-            "-d", &body.to_string(),
-            url,
-        ])
-        .output()?;
+    let _ = crate::util::ensure_private_file(&cookie_path);
+    let args = vec![
+        "-s".to_string(),
+        "--connect-timeout".to_string(),
+        "10".to_string(),
+        "--max-time".to_string(),
+        "30".to_string(),
+        "-X".to_string(),
+        "POST".to_string(),
+        "-A".to_string(),
+        CHROME_USER_AGENT.to_string(),
+        "-H".to_string(),
+        "Accept: application/json".to_string(),
+        "-H".to_string(),
+        "Content-Type: application/json".to_string(),
+        "-H".to_string(),
+        format!("Origin: {}", idlix_base_url()),
+        "-H".to_string(),
+        format!("Referer: {}", idlix_referer()),
+        "-b".to_string(),
+        cookie_path.clone(),
+        "-c".to_string(),
+        cookie_path,
+        "-d".to_string(),
+        body.to_string(),
+        url.to_string(),
+    ];
+    let output = Command::new("curl").args(&args).output()?;
 
     if !output.status.success() {
         anyhow::bail!("Curl POST failed with status: {}", output.status);
@@ -98,7 +138,7 @@ pub struct Idlix {
 impl Idlix {
     pub fn new() -> Self {
         Self {
-            base_url: "https://z2.idlixku.com".to_string(),
+            base_url: idlix_base_url(),
         }
     }
 }
@@ -641,6 +681,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires network access to Idlix"]
     fn test_idlix_search() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {

@@ -150,7 +150,16 @@ Dibandingkan dengan repo upstream (`lucasbuilds/animeku-cli`), fork ini membawa 
 - **Self-Update Aman di Windows**:
   - Mencegah error file-locking executable saat self-update di Windows dengan auto-rename binary berjalan.
 
-#### 6. Credits
+#### 6. Catatan Teknis
+- File sesi (cookie Idlix, playlist sementara, subtitle, dan debug log) kini disimpan di direktori data privat user, bukan di `/tmp` yang bisa dibaca user lain.
+- Domain provider dapat diganti tanpa rebuild melalui environment variable:
+  ```bash
+  ANIMEKU_IDLIX_BASE_URL=https://domain-baru.idlixku.com animeku-cli
+  ANIMEKU_OTAKUDESU_BASE_URL=https://domain-baru.otakudesu.blog animeku-cli
+  ```
+- Proxy HLS lokal melakukan streaming segmen (tidak menampung seluruh video di memori), meneruskan `Range`/`Content-Range` dengan benar, dan otomatis berhenti saat playback selesai.
+
+#### 7. Credits
 - [lucasbuilds](https://github.com/lucasbuilds/animeku-cli) - For Base Repo
 - [Wingky530](https://github.com/Wingky530/otakudesu-scraper) - For Otakudesu Scraper
 - [annurdian](https://github.com/annurdien/IDLIX-API) - For Idlixku API

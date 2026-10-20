@@ -163,7 +163,7 @@ pub async fn get_live_input(prompt: &str) -> anyhow::Result<Option<(String, bool
 
     render(&input, &suggestions, selected_index, is_loading)?;
 
-    let mut debounce_timer = tokio::time::sleep(Duration::MAX);
+    let debounce_timer = tokio::time::sleep(Duration::MAX);
     tokio::pin!(debounce_timer);
     
     let mut fetch_task: Option<tokio::task::JoinHandle<()>> = None;
@@ -254,22 +254,18 @@ pub async fn get_live_input(prompt: &str) -> anyhow::Result<Option<(String, bool
                                 input.push(c);
                                 debounce_timer.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(500));
                             }
-                            KeyCode::Down => {
-                                if !suggestions.is_empty() {
-                                    selected_index = match selected_index {
-                                        None => Some(0),
-                                        Some(idx) => Some(std::cmp::min(idx + 1, suggestions.len() - 1)),
-                                    };
-                                }
+                            KeyCode::Down if !suggestions.is_empty() => {
+                                selected_index = match selected_index {
+                                    None => Some(0),
+                                    Some(idx) => Some(std::cmp::min(idx + 1, suggestions.len() - 1)),
+                                };
                             }
-                            KeyCode::Up => {
-                                if !suggestions.is_empty() {
-                                    selected_index = match selected_index {
-                                        None => None,
-                                        Some(0) => None,
-                                        Some(idx) => Some(idx - 1),
-                                    };
-                                }
+                            KeyCode::Up if !suggestions.is_empty() => {
+                                selected_index = match selected_index {
+                                    None => None,
+                                    Some(0) => None,
+                                    Some(idx) => Some(idx - 1),
+                                };
                             }
                             _ => {}
                         }

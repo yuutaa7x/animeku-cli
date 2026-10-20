@@ -10,6 +10,18 @@ use crate::{
     models::{Episode, Meta, Movie, Stream},
 };
 
+pub const OTAKUDESU_BASE_URL: &str = "https://otakudesu.blog";
+pub const OTAKUDESU_REFERER: &str = "https://desustream.net/";
+pub const OTAKUDESU_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36";
+
+pub fn otakudesu_base_url() -> String {
+    std::env::var("ANIMEKU_OTAKUDESU_BASE_URL")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| OTAKUDESU_BASE_URL.to_string())
+}
+
 pub struct Otakudesu {
     client: Client,
     base_url: String,
@@ -19,16 +31,16 @@ impl Otakudesu {
     pub fn new() -> Self {
         Self {
             client: Client::builder()
-                .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36")
+                .user_agent(OTAKUDESU_USER_AGENT)
                 .build()
                 .unwrap(),
-            base_url: "https://otakudesu.blog".to_string(),
+            base_url: otakudesu_base_url(),
         }
     }
 
     async fn resolve_desustream(&self, url: &str) -> String {
         if !url.contains("desustream") {
-            return url.to_string();
+            return clean_url(url);
         }
         if let Ok(resp) = self.client.get(url).send().await {
             if let Ok(text) = resp.text().await {
@@ -37,8 +49,15 @@ impl Otakudesu {
                 }
             }
         }
-        url.to_string()
+        clean_url(url)
     }
+}
+
+/// Decode HTML entities that leak from `src="..."` attributes. Google video
+/// URLs contain many `&amp;` separators; leaving them encoded breaks the
+/// signature and results in HTTP 403.
+fn clean_url(raw: &str) -> String {
+    html_escape::decode_html_entities(raw.trim()).to_string()
 }
 
 fn extract_between<'a>(text: &'a str, start_delim: &str, end_delim: &str) -> Option<&'a str> {
@@ -49,16 +68,10 @@ fn extract_between<'a>(text: &'a str, start_delim: &str, end_delim: &str) -> Opt
 }
 
 fn extract_desustream_url(text: &str) -> Option<String> {
-    if let Some(src) = extract_between(text, "<source src=\"", "\"") {
-        return Some(src.to_string());
-    }
-    if let Some(file) = extract_between(text, "otakudesu('{\"file\":\"", "\"") {
-        return Some(file.to_string());
-    }
-    if let Some(file) = extract_between(text, "\"file\":\"", "\"") {
-        return Some(file.to_string());
-    }
-    None
+    extract_between(text, "<source src=\"", "\"")
+        .or_else(|| extract_between(text, "otakudesu('{\"file\":\"", "\""))
+        .or_else(|| extract_between(text, "\"file\":\"", "\""))
+        .map(clean_url)
 }
 
 #[async_trait]
@@ -146,7 +159,7 @@ impl Ext for Otakudesu {
                     continue;
                 }
                 if !sinopsis_text.is_empty() {
-                    sinopsis_text.push_str(" ");
+                    sinopsis_text.push(' ');
                 }
                 sinopsis_text.push_str(&clean);
             }
@@ -175,7 +188,7 @@ impl Ext for Otakudesu {
             let iframe_sel = Selector::parse("#pembed iframe, .player-embed iframe").unwrap();
             if let Some(iframe) = document.select(&iframe_sel).next() {
                 if let Some(src) = iframe.value().attr("src") {
-                    let mut url = src.to_string();
+                    let mut url = clean_url(src);
                     if url.starts_with("//") {
                         url = format!("https:{}", url);
                     }
@@ -240,7 +253,7 @@ impl Ext for Otakudesu {
                         if let Ok(html_bytes) = base64::prelude::BASE64_STANDARD.decode(data) {
                             if let Ok(html_str) = String::from_utf8(html_bytes) {
                                 if let Some(src) = extract_between(&html_str, "src=\"", "\"") {
-                                    let mut url = src.to_string();
+                                    let mut url = clean_url(src);
                                     
                                     if url.starts_with("//") {
                                         url = format!("https:{}", url);
@@ -287,5 +300,25 @@ mod tests {
 
         let html3 = r#"{"other":1,"file":"https://stream.desu/fallback.mp4"}"#;
         assert_eq!(extract_desustream_url(html3), Some("https://stream.desu/fallback.mp4".to_string()));
+    }
+
+    #[test]
+    fn test_extract_desustream_url_decodes_html_entities() {
+        let html = r#"<source src="https://rr3.googlevideo.com/videoplayback?expire=1&amp;sig=abc&amp;lsig=def">"#;
+        assert_eq!(
+            extract_desustream_url(html),
+            Some(
+                "https://rr3.googlevideo.com/videoplayback?expire=1&sig=abc&lsig=def"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_clean_url_trims_and_decodes() {
+        assert_eq!(
+            clean_url("  https://example.com/a?x=1&amp;y=2  "),
+            "https://example.com/a?x=1&y=2"
+        );
     }
 }

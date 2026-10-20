@@ -51,11 +51,11 @@ impl WatchEntry {
     }
 }
 
-/// Backward-compatibility alias.
+/// Backward-compatibility alias used by older history payloads/tests.
+#[allow(dead_code)]
 pub type LastWatch = WatchEntry;
 
-/// Ordered watch history (most recent first), capped at 30 entries.
-
+/// Format seconds as `MM:SS`, or `HH:MM:SS` when the duration is at least an hour.
 pub fn format_seconds(seconds: u64) -> String {
     let hours = seconds / 3600;
     let minutes = (seconds % 3600) / 60;
