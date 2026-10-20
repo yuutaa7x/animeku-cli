@@ -169,7 +169,20 @@ impl AnimekuCli {
                 .iter()
                 .position(|item| item.action == SearchAction::Select)
                 .unwrap_or(0);
-            let item = input::choice_with_default(menu, default_index)?;
+            let entries = menu
+                .iter()
+                .map(|item| match item.action {
+                    SearchAction::Separator => input::MenuEntry::separator(item.label.clone()),
+                    _ => input::MenuEntry::new(item.label.clone()),
+                })
+                .collect::<Vec<_>>();
+            let Some(selected) = input::select_menu("Pilih", &entries, default_index)? else {
+                return Ok(None);
+            };
+            let item = match menu.into_iter().nth(selected) {
+                Some(item) => item,
+                None => continue,
+            };
             match item.action {
                 SearchAction::Back => return Ok(None),
                 SearchAction::Previous => page -= 1,

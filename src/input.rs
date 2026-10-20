@@ -1,5 +1,7 @@
 use std::fs;
 
+use dialoguer::console::{style, Key, Term};
+
 // ─── Search History ───────────────────────────────────────────────────────────
 
 const MAX_SEARCH_HISTORY: usize = 50;
@@ -247,4 +249,259 @@ pub fn choice_with_default<T: std::fmt::Display + Clone>(
         .items(&options)
         .interact()?;
     Ok(options[selected].clone())
+}
+
+// ─── Menu with non-selectable separators ─────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct MenuEntry {
+    label: String,
+    selectable: bool,
+}
+
+impl MenuEntry {
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            selectable: true,
+        }
+    }
+
+    pub fn separator(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            selectable: false,
+        }
+    }
+}
+
+fn first_selectable(entries: &[MenuEntry], visible: &[usize]) -> Option<usize> {
+    visible
+        .iter()
+        .copied()
+        .find(|&index| entries[index].selectable)
+}
+
+fn step_selectable(
+    entries: &[MenuEntry],
+    visible: &[usize],
+    current: usize,
+    forward: bool,
+) -> usize {
+    if visible.is_empty() {
+        return current;
+    }
+
+    let position = visible
+        .iter()
+        .position(|&index| index == current)
+        .unwrap_or(0);
+    for offset in 1..=visible.len() {
+        let next = if forward {
+            (position + offset) % visible.len()
+        } else {
+            (position + visible.len() - (offset % visible.len())) % visible.len()
+        };
+        let index = visible[next];
+        if entries[index].selectable {
+            return index;
+        }
+    }
+    current
+}
+
+fn visible_entries(entries: &[MenuEntry], filter: &str) -> Vec<usize> {
+    let query = filter.trim().to_lowercase();
+    if query.is_empty() {
+        (0..entries.len()).collect()
+    } else {
+        entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                entry.selectable && entry.label.to_lowercase().contains(&query)
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+}
+
+/// Select from a list where separator rows are visible but can never become
+/// the active row. Typing filters the selectable entries; Backspace removes the
+/// filter and Escape cancels the selection.
+pub fn select_menu(
+    prompt: &str,
+    entries: &[MenuEntry],
+    default: usize,
+) -> anyhow::Result<Option<usize>> {
+    if entries.iter().all(|entry| !entry.selectable) {
+        anyhow::bail!("menu tidak memiliki pilihan");
+    }
+
+    let term = Term::stderr();
+    term.hide_cursor()?;
+    let result = run_select_menu(&term, prompt, entries, default);
+    term.show_cursor()?;
+    result
+}
+
+fn run_select_menu(
+    term: &Term,
+    prompt: &str,
+    entries: &[MenuEntry],
+    default: usize,
+) -> anyhow::Result<Option<usize>> {
+    let mut filter = String::new();
+    let mut selected = {
+        let visible = visible_entries(entries, &filter);
+        let start = default.min(entries.len());
+        visible
+            .iter()
+            .copied()
+            .find(|&index| index >= start && entries[index].selectable)
+            .or_else(|| first_selectable(entries, &visible))
+    };
+    let mut drawn_lines = 0usize;
+
+    loop {
+        if drawn_lines > 0 {
+            term.clear_last_lines(drawn_lines)?;
+        }
+
+        let visible = visible_entries(entries, &filter);
+        if selected.is_none_or(|index| {
+            !visible.contains(&index) || !entries[index].selectable
+        }) {
+            selected = first_selectable(entries, &visible);
+        }
+
+        let prompt_line = if filter.is_empty() {
+            format!("{} {}", style("?").cyan(), prompt)
+        } else {
+            format!("{} {} {}", style("?").cyan(), prompt, style(&filter).cyan())
+        };
+        term.write_line(&prompt_line)?;
+        let mut lines = 1usize;
+
+        if visible.is_empty() {
+            term.write_line(&format!("  {}", style("(tidak ada hasil)").dim()))?;
+            lines += 1;
+        } else {
+            let rows = term.size().0 as usize;
+            let max_rows = rows.saturating_sub(3).clamp(1, 10).min(visible.len());
+            let selected_position = selected
+                .and_then(|index| visible.iter().position(|&item| item == index))
+                .unwrap_or(0);
+            let start = selected_position.saturating_sub(max_rows.saturating_sub(1));
+            let end = (start + max_rows).min(visible.len());
+
+            for &index in &visible[start..end] {
+                let entry = &entries[index];
+                if !entry.selectable {
+                    term.write_line(&format!("  {}", style(&entry.label).dim()))?;
+                } else if Some(index) == selected {
+                    term.write_line(&format!(
+                        "{} {}",
+                        style("❯").cyan(),
+                        style(&entry.label).cyan()
+                    ))?;
+                } else {
+                    term.write_line(&format!("  {}", entry.label))?;
+                }
+                lines += 1;
+            }
+        }
+
+        drawn_lines = lines;
+        term.flush()?;
+
+        match term.read_key()? {
+            Key::ArrowUp | Key::BackTab => {
+                if let Some(current) = selected {
+                    selected = Some(step_selectable(entries, &visible, current, false));
+                }
+            }
+            Key::ArrowDown | Key::Tab => {
+                if let Some(current) = selected {
+                    selected = Some(step_selectable(entries, &visible, current, true));
+                }
+            }
+            Key::Backspace => {
+                if !filter.is_empty() {
+                    filter.pop();
+                    let visible = visible_entries(entries, &filter);
+                    selected = first_selectable(entries, &visible);
+                }
+            }
+            Key::Char(ch) if !ch.is_control() => {
+                filter.push(ch);
+                let visible = visible_entries(entries, &filter);
+                selected = first_selectable(entries, &visible);
+            }
+            Key::Enter => {
+                if let Some(index) = selected {
+                    term.clear_last_lines(drawn_lines)?;
+                    term.write_line(&format!(
+                        "{} {} {}",
+                        style("?").cyan(),
+                        prompt,
+                        style(&entries[index].label).cyan()
+                    ))?;
+                    term.flush()?;
+                    return Ok(Some(index));
+                }
+            }
+            Key::Escape => {
+                term.clear_last_lines(drawn_lines)?;
+                term.flush()?;
+                return Ok(None);
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entries() -> Vec<MenuEntry> {
+        vec![
+            MenuEntry::new("[ Kembali ke Pencarian ]"),
+            MenuEntry::separator("────────────────────────"),
+            MenuEntry::new("1. Takopii no Genzai"),
+            MenuEntry::separator("────────────────────────"),
+            MenuEntry::new("Selanjutnya (Halaman 2)"),
+        ]
+    }
+
+    #[test]
+    fn navigation_skips_separators_in_both_directions() {
+        let entries = entries();
+        let visible = visible_entries(&entries, "");
+
+        assert_eq!(step_selectable(&entries, &visible, 0, true), 2);
+        assert_eq!(step_selectable(&entries, &visible, 2, true), 4);
+        assert_eq!(step_selectable(&entries, &visible, 4, true), 0);
+        assert_eq!(step_selectable(&entries, &visible, 4, false), 2);
+        assert_eq!(step_selectable(&entries, &visible, 2, false), 0);
+    }
+
+    #[test]
+    fn filter_only_returns_selectable_matches() {
+        let entries = entries();
+        assert_eq!(visible_entries(&entries, "takopii"), vec![2]);
+        assert_eq!(visible_entries(&entries, "halaman 2"), vec![4]);
+        assert!(visible_entries(&entries, "tidak-ada").is_empty());
+    }
+
+    #[test]
+    fn first_selectable_skips_a_leading_separator() {
+        let entries = vec![
+            MenuEntry::separator("────────────────────────"),
+            MenuEntry::new("1. Takopii no Genzai"),
+        ];
+        let visible = visible_entries(&entries, "");
+        assert_eq!(first_selectable(&entries, &visible), Some(1));
+    }
 }

@@ -1167,18 +1167,18 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
         let watch_history = load_watch_history();
         let search_history = load_history();
 
-        let mut menu_items: Vec<String> = Vec::new();
+        let mut menu_items: Vec<input::MenuEntry> = Vec::new();
 
         // 1. Add Watch History entries
         for lw in &watch_history {
             let provider_name = if lw.provider_type == PROVIDER_OTAKUDESU { "Otakudesu" } else { "Idlix" };
-            menu_items.push(format!(
+            menu_items.push(input::MenuEntry::new(format!(
                 "[ Lanjutkan: {} - {} | {} | {} ]",
                 crate::models::clean_movie_title(&lw.movie.title),
                 crate::models::clean_episode_title(&lw.episode.title),
                 lw.format_duration(),
                 provider_name
-            ));
+            )));
         }
 
         if watch_history.is_empty() && search_history.is_empty() {
@@ -1192,26 +1192,22 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
         // 2. Separator + Search History
         let separator_index: Option<usize> = if !search_history.is_empty() {
             let idx = menu_items.len();
-            menu_items.push("─── Search History ───────────────────────────".to_string());
+            menu_items.push(input::MenuEntry::separator(
+                "─── Search History ───────────────────────────",
+            ));
             Some(idx)
         } else {
             None
         };
 
         for title in &search_history {
-            menu_items.push(format!("  {}", title));
+            menu_items.push(input::MenuEntry::new(format!("  {}", title)));
         }
-        menu_items.push("  Kembali".to_string());
+        menu_items.push(input::MenuEntry::new("  Kembali"));
 
-        let choice = dialoguer::Select::with_theme(&crate::util::custom_theme())
-            .with_prompt("Watch & Search History:")
-            .default(0)
-            .items(&menu_items)
-            .interact()?;
-
-        if Some(choice) == separator_index {
-            continue;
-        }
+        let Some(choice) = input::select_menu("Watch & Search History:", &menu_items, 0)? else {
+            break;
+        };
 
         let back_index = menu_items.len() - 1;
         if choice == back_index {
