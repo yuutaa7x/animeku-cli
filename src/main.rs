@@ -450,10 +450,7 @@ fn update_discord_status(
         None => return,
     };
 
-    let mut large_image = thumb_url.unwrap_or_else(|| DEFAULT_DISCORD_LOGO.to_string());
-    if large_image.contains("otakudesu") {
-        large_image = DEFAULT_DISCORD_LOGO.to_string();
-    }
+    let large_image = thumb_url.unwrap_or_else(|| DEFAULT_DISCORD_LOGO.to_string());
 
     let clean_movie = clean_title(movie_title);
     let clean_ep = clean_title(episode_title);
