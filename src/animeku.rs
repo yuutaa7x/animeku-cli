@@ -358,13 +358,22 @@ impl AnimekuCli {
                 .position(|action| matches!(action, EpisodeAction::Select(_)))
                 .unwrap_or(0);
             let prompt = if total_pages > 1 {
-                format!("Pilih Episode (Halaman {}/{}):", page, total_pages)
+                format!("Pilih Episode (Halaman {}/{} • ←/→):", page, total_pages)
             } else {
                 "Pilih Episode:".to_string()
             };
 
-            let Some(selected) = input::select_menu(&prompt, &entries, default_index)? else {
-                return Ok(None);
+            let selected = match input::select_menu_paged(&prompt, &entries, default_index)? {
+                input::MenuResult::Selected(index) => index,
+                input::MenuResult::PreviousPage => {
+                    page = page.saturating_sub(1).max(1);
+                    continue;
+                }
+                input::MenuResult::NextPage => {
+                    page = (page + 1).min(total_pages as usize);
+                    continue;
+                }
+                input::MenuResult::Cancelled => return Ok(None),
             };
 
             match actions[selected] {

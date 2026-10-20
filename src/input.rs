@@ -360,6 +360,15 @@ fn visible_entries(entries: &[MenuEntry], filter: &str) -> Vec<usize> {
     }
 }
 
+/// Result of a menu that supports horizontal page navigation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuResult {
+    Selected(usize),
+    PreviousPage,
+    NextPage,
+    Cancelled,
+}
+
 /// Select from a list where separator rows are visible but can never become
 /// the active row. Typing filters the selectable entries; Backspace removes the
 /// filter and Escape cancels the selection.
@@ -368,13 +377,35 @@ pub fn select_menu(
     entries: &[MenuEntry],
     default: usize,
 ) -> anyhow::Result<Option<usize>> {
+    match run_menu(prompt, entries, default, false)? {
+        MenuResult::Selected(index) => Ok(Some(index)),
+        _ => Ok(None),
+    }
+}
+
+/// Like `select_menu`, but Left/Right arrows return page-navigation results
+/// instead of being ignored. Used by the paginated episode picker.
+pub fn select_menu_paged(
+    prompt: &str,
+    entries: &[MenuEntry],
+    default: usize,
+) -> anyhow::Result<MenuResult> {
+    run_menu(prompt, entries, default, true)
+}
+
+fn run_menu(
+    prompt: &str,
+    entries: &[MenuEntry],
+    default: usize,
+    page_keys: bool,
+) -> anyhow::Result<MenuResult> {
     if entries.iter().all(|entry| !entry.selectable) {
         anyhow::bail!("menu tidak memiliki pilihan");
     }
 
     let term = Term::stderr();
     term.hide_cursor()?;
-    let result = run_select_menu(&term, prompt, entries, default);
+    let result = run_select_menu(&term, prompt, entries, default, page_keys);
     term.show_cursor()?;
     result
 }
@@ -384,7 +415,8 @@ fn run_select_menu(
     prompt: &str,
     entries: &[MenuEntry],
     default: usize,
-) -> anyhow::Result<Option<usize>> {
+    page_keys: bool,
+) -> anyhow::Result<MenuResult> {
     let mut filter = String::new();
     let mut selected = {
         let visible = visible_entries(entries, &filter);
@@ -507,13 +539,23 @@ fn run_select_menu(
                     let final_line = fit_line(&final_line, term.size().1 as usize);
                     term.write_line(&format!("{}", style(&final_line).cyan()))?;
                     term.flush()?;
-                    return Ok(Some(index));
+                    return Ok(MenuResult::Selected(index));
                 }
+            }
+            Key::ArrowLeft if page_keys => {
+                term.clear_last_lines(drawn_lines)?;
+                term.flush()?;
+                return Ok(MenuResult::PreviousPage);
+            }
+            Key::ArrowRight if page_keys => {
+                term.clear_last_lines(drawn_lines)?;
+                term.flush()?;
+                return Ok(MenuResult::NextPage);
             }
             Key::Escape => {
                 term.clear_last_lines(drawn_lines)?;
                 term.flush()?;
-                return Ok(None);
+                return Ok(MenuResult::Cancelled);
             }
             _ => {}
         }
