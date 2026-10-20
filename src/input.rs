@@ -232,9 +232,17 @@ pub async fn get_user_input() -> anyhow::Result<Option<Input>> {
 // ─── Generic choice helper ───────────────────────────────────────────────────
 
 pub fn choice<T: std::fmt::Display + Clone>(options: Vec<T>, _fuzzy: bool) -> anyhow::Result<T> {
+    choice_with_default(options, 0)
+}
+
+pub fn choice_with_default<T: std::fmt::Display + Clone>(
+    options: Vec<T>,
+    default: usize,
+) -> anyhow::Result<T> {
+    let default = default.min(options.len().saturating_sub(1));
     let selected = dialoguer::FuzzySelect::with_theme(&crate::util::custom_theme())
         .with_prompt("Pilih")
-        .default(0)
+        .default(default)
         .max_length(8)
         .items(&options)
         .interact()?;

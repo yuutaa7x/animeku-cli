@@ -60,6 +60,13 @@ fn clean_url(raw: &str) -> String {
     html_escape::decode_html_entities(raw.trim()).to_string()
 }
 
+fn page_number_from_href(href: &str) -> u64 {
+    let re = regex::Regex::new(r"(?:/page/|[?&]paged=)(\d+)").unwrap();
+    re.captures(href)
+        .and_then(|caps| caps[1].parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
 fn extract_between<'a>(text: &'a str, start_delim: &str, end_delim: &str) -> Option<&'a str> {
     let start_idx = text.find(start_delim)?;
     let rest = &text[start_idx + start_delim.len()..];
@@ -76,17 +83,31 @@ fn extract_desustream_url(text: &str) -> Option<String> {
 
 #[async_trait]
 impl Ext for Otakudesu {
-    async fn search(&mut self, title: String, _page: usize) -> anyhow::Result<(Vec<Movie>, u64)> {
-        let url = format!("{}/?s={}&post_type=anime", self.base_url, urlencoding::encode(&title));
+    async fn search(&mut self, title: String, page: usize) -> anyhow::Result<(Vec<Movie>, u64)> {
+        let page = page.max(1);
+        let url = if page == 1 {
+            format!(
+                "{}/?s={}&post_type=anime",
+                self.base_url,
+                urlencoding::encode(&title)
+            )
+        } else {
+            format!(
+                "{}/page/{}/?s={}&post_type=anime",
+                self.base_url,
+                page,
+                urlencoding::encode(&title)
+            )
+        };
         let html_text = self.client.get(&url).send().await?.text().await?;
         let document = Html::parse_document(&html_text);
         let selector = Selector::parse("ul.chivsrc li").unwrap();
         let a_selector = Selector::parse("h2 a").unwrap();
-        
+
         let mut movies = vec![];
         for element in document.select(&selector) {
             if let Some(a_el) = element.select(&a_selector).next() {
-                let text = a_el.inner_html().trim().to_string();
+                let text = crate::models::clean_movie_title(&a_el.inner_html());
                 let href = a_el.value().attr("href").unwrap_or("").to_string();
                 movies.push(Movie {
                     id: href,
@@ -95,9 +116,24 @@ impl Ext for Otakudesu {
                 });
             }
         }
-        
-        // Pagination logic not fully implemented for otakudesu, returning hardcoded total 1 for now
-        Ok((movies, 1))
+
+        // Only expose a next page when the search page actually links to one.
+        // If there is no pagination markup, this stays at the current page.
+        let mut total_pages = page as u64;
+        for pagination_selector in [".pagination a", ".pagenavi a", ".hpage a", "a.page-numbers"] {
+            if let Ok(selector) = Selector::parse(pagination_selector) {
+                for link in document.select(&selector) {
+                    if let Some(href) = link.value().attr("href") {
+                        total_pages = total_pages.max(page_number_from_href(href));
+                    }
+                    if let Ok(number) = link.text().collect::<String>().trim().parse::<u64>() {
+                        total_pages = total_pages.max(number);
+                    }
+                }
+            }
+        }
+
+        Ok((movies, total_pages))
     }
 
     async fn get_episodes(&self, movie: Movie) -> anyhow::Result<(Vec<Episode>, Meta)> {
@@ -111,14 +147,14 @@ impl Ext for Otakudesu {
 
         for element in document.select(&ep_list_selector) {
             if let Some(a_el) = element.select(&a_selector).next() {
-                let text = a_el.inner_html().trim().to_string();
+                let raw_text = a_el.inner_html();
                 let href = a_el.value().attr("href").unwrap_or("").to_string();
-                if text.to_lowercase().contains("batch") || href.contains("/lengkap/") || href.contains("/batch/") {
+                if raw_text.to_lowercase().contains("batch") || href.contains("/lengkap/") || href.contains("/batch/") {
                     continue;
                 }
                 episodes.push(Episode {
                     id: href,
-                    title: text,
+                    title: crate::models::clean_episode_title(&raw_text),
                     is_series: true,
                 });
             }
@@ -319,6 +355,22 @@ mod tests {
         assert_eq!(
             clean_url("  https://example.com/a?x=1&amp;y=2  "),
             "https://example.com/a?x=1&y=2"
+        );
+    }
+
+    #[test]
+    fn test_page_number_from_href() {
+        assert_eq!(
+            page_number_from_href("https://otakudesu.blog/page/2/?s=naruto&post_type=anime"),
+            2
+        );
+        assert_eq!(
+            page_number_from_href("https://otakudesu.blog/?s=naruto&paged=3"),
+            3
+        );
+        assert_eq!(
+            page_number_from_href("https://otakudesu.blog/anime/example/"),
+            0
         );
     }
 }

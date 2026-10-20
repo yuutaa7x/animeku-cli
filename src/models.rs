@@ -67,6 +67,60 @@ pub fn format_seconds(seconds: u64) -> String {
     }
 }
 
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn strip_suffix_ci(text: &str, suffix: &str) -> String {
+    if text.to_lowercase().ends_with(&suffix.to_lowercase()) {
+        text[..text.len() - suffix.len()].trim_end().to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+/// Remove Otakudesu listing noise such as `(Episode 1 – 6) Subtitle Indonesia`
+/// so history entries show the actual anime title.
+pub fn clean_movie_title(raw: &str) -> String {
+    let decoded = html_escape::decode_html_entities(raw);
+    let mut title = collapse_whitespace(&decoded);
+    title = strip_suffix_ci(&title, " subtitle indonesia");
+
+    let range = regex::Regex::new(
+        r"(?i)\s*\(\s*episode\s*\d{1,4}(?:\s*[-–—~]\s*\d{1,4})?\s*\)\s*$",
+    )
+    .unwrap();
+    title = collapse_whitespace(&range.replace(&title, ""));
+
+    if title.is_empty() {
+        collapse_whitespace(&decoded)
+    } else {
+        title
+    }
+}
+
+/// Convert provider-specific episode labels into a short `Episode N` label.
+/// Titles that already use another format (for example Idlix `S1E01`) are
+/// returned unchanged.
+pub fn clean_episode_title(raw: &str) -> String {
+    let decoded = html_escape::decode_html_entities(raw);
+    let text = collapse_whitespace(&decoded);
+
+    let episode = regex::Regex::new(r"(?i)\b(?:episode|eps?)\s*\.?\s*(\d{1,4})\b").unwrap();
+    if let Some(caps) = episode.captures(&text) {
+        if let Ok(number) = caps[1].parse::<u32>() {
+            return format!("Episode {}", number);
+        }
+    }
+
+    let stripped = strip_suffix_ci(&text, " subtitle indonesia");
+    if stripped.is_empty() {
+        text
+    } else {
+        stripped
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Stream {
     pub url: String,
@@ -97,6 +151,30 @@ mod tests {
         assert_eq!(format_seconds(125), "02:05");
         assert_eq!(format_seconds(3600), "01:00:00");
         assert_eq!(format_seconds(3665), "01:01:05");
+    }
+
+    #[test]
+    fn test_clean_otakudesu_titles() {
+        assert_eq!(
+            clean_movie_title("Takopii no Genzai (Episode 1 – 6) Subtitle Indonesia"),
+            "Takopii no Genzai"
+        );
+        assert_eq!(
+            clean_movie_title("Jujutsu Kaisen Season 2 (Episode 1 - 12) Subtitle Indonesia"),
+            "Jujutsu Kaisen Season 2"
+        );
+        assert_eq!(
+            clean_episode_title("Takopii no Genzai Episode 1 Subtitle Indonesia"),
+            "Episode 1"
+        );
+        assert_eq!(
+            clean_episode_title("Takopii no Genzai Eps. 06 Subtitle Indonesia"),
+            "Episode 6"
+        );
+        assert_eq!(
+            clean_episode_title("S1E01 - To You in 2016"),
+            "S1E01 - To You in 2016"
+        );
     }
 
     #[test]

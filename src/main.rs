@@ -983,6 +983,10 @@ async fn handle_movie_episodes(
                 let confirm = dialoguer::Confirm::with_theme(&crate::util::custom_theme())
                     .with_prompt(format!("Lanjut ke {}?", next_ep.title.trim()))
                     .default(true)
+                    // `default(true)` membuat dialoguer menampilkan kata "yes"
+                    // sebagai hint sebelum user menjawab. Sembunyikan hint itu,
+                    // tapi Enter tetap berarti "ya".
+                    .show_default(false)
                     .interact()?;
                 
                 if confirm {
@@ -1170,8 +1174,8 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
             let provider_name = if lw.provider_type == PROVIDER_OTAKUDESU { "Otakudesu" } else { "Idlix" };
             menu_items.push(format!(
                 "[ Lanjutkan: {} - {} | {} | {} ]",
-                lw.movie.title.trim(),
-                lw.episode.title.trim(),
+                crate::models::clean_movie_title(&lw.movie.title),
+                crate::models::clean_episode_title(&lw.episode.title),
                 lw.format_duration(),
                 provider_name
             ));
@@ -1221,9 +1225,11 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
             let selected_watch = watch_history[choice].clone();
             
             clearscreen_and_show_banner()?;
+            let display_title = crate::models::clean_movie_title(&selected_watch.movie.title);
+            let display_episode = crate::models::clean_episode_title(&selected_watch.episode.title);
             println!("Riwayat Tontonan:");
-            println!("  Judul    : {}", selected_watch.movie.title.trim());
-            println!("  Episode  : {}", selected_watch.episode.title.trim());
+            println!("  Judul    : {}", display_title);
+            println!("  Episode  : {}", display_episode);
             println!("  Posisi   : {}", selected_watch.format_duration());
             let provider_name = if selected_watch.provider_type == PROVIDER_OTAKUDESU { "Otakudesu" } else { "Idlix" };
             println!("  Provider : {}\n", provider_name);
@@ -1264,8 +1270,8 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
 
             update_discord_status(
                 discord,
-                &selected_watch.movie.title,
-                &selected_watch.episode.title,
+                &display_title,
+                &display_episode,
                 selected_watch.episode.is_series,
                 season_num,
                 None,
