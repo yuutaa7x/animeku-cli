@@ -192,18 +192,21 @@ const NEW_SEARCH_LABEL: &str = "[ Cari judul baru... ]";
 pub async fn get_user_input() -> anyhow::Result<Option<Input>> {
     let history = load_history();
 
-    // Build items: first option is always "new search", rest are history
-    let mut items: Vec<String> = vec![NEW_SEARCH_LABEL.to_string()];
-    items.extend(history);
+    // Build items: first option is always "new search", rest are history.
+    // A custom menu is used here so q + Enter can return instead of being
+    // swallowed as a FuzzySelect filter character.
+    let mut entries = Vec::with_capacity(history.len() + 1);
+    entries.push(MenuEntry::new(NEW_SEARCH_LABEL));
+    entries.extend(history.iter().cloned().map(MenuEntry::new));
 
-    let selection = dialoguer::FuzzySelect::with_theme(&crate::util::custom_theme())
-        .with_prompt("Cari anime/movie (q untuk kembali, ketik untuk filter histori):")
-        .default(0)
-        .items(&items)
-        .interact_opt()?;
+    let selection = select_menu_q_back(
+        "Cari anime/movie (q untuk kembali, ketik untuk filter histori):",
+        &entries,
+        0,
+    )?;
 
     let (title, is_sugg) = match selection {
-        // User pressed Escape / closed
+        // User pressed Escape / q
         None => return Ok(None),
         Some(0) => {
             // "New search" selected → use custom live async autocomplete!
@@ -216,7 +219,7 @@ pub async fn get_user_input() -> anyhow::Result<Option<Input>> {
         }
         Some(idx) => {
             // History item chosen directly
-            (items[idx].clone(), false)
+            (history[idx - 1].clone(), false)
         }
     };
 
@@ -344,6 +347,10 @@ fn fit_line(text: &str, width: usize) -> String {
     truncate_str(text, width.max(1), "…").into_owned()
 }
 
+fn is_q_back(filter: &str, q_back: bool) -> bool {
+    q_back && filter.trim().eq_ignore_ascii_case("q")
+}
+
 fn visible_entries(entries: &[MenuEntry], filter: &str) -> Vec<usize> {
     let query = filter.trim().to_lowercase();
     if query.is_empty() {
@@ -377,7 +384,19 @@ pub fn select_menu(
     entries: &[MenuEntry],
     default: usize,
 ) -> anyhow::Result<Option<usize>> {
-    match run_menu(prompt, entries, default, false)? {
+    match run_menu(prompt, entries, default, false, false)? {
+        MenuResult::Selected(index) => Ok(Some(index)),
+        _ => Ok(None),
+    }
+}
+
+/// History picker variant where typing `q` and pressing Enter cancels.
+pub fn select_menu_q_back(
+    prompt: &str,
+    entries: &[MenuEntry],
+    default: usize,
+) -> anyhow::Result<Option<usize>> {
+    match run_menu(prompt, entries, default, false, true)? {
         MenuResult::Selected(index) => Ok(Some(index)),
         _ => Ok(None),
     }
@@ -390,7 +409,7 @@ pub fn select_menu_paged(
     entries: &[MenuEntry],
     default: usize,
 ) -> anyhow::Result<MenuResult> {
-    run_menu(prompt, entries, default, true)
+    run_menu(prompt, entries, default, true, false)
 }
 
 fn run_menu(
@@ -398,6 +417,7 @@ fn run_menu(
     entries: &[MenuEntry],
     default: usize,
     page_keys: bool,
+    q_back: bool,
 ) -> anyhow::Result<MenuResult> {
     if entries.iter().all(|entry| !entry.selectable) {
         anyhow::bail!("menu tidak memiliki pilihan");
@@ -405,7 +425,7 @@ fn run_menu(
 
     let term = Term::stderr();
     term.hide_cursor()?;
-    let result = run_select_menu(&term, prompt, entries, default, page_keys);
+    let result = run_select_menu(&term, prompt, entries, default, page_keys, q_back);
     term.show_cursor()?;
     result
 }
@@ -416,6 +436,7 @@ fn run_select_menu(
     entries: &[MenuEntry],
     default: usize,
     page_keys: bool,
+    q_back: bool,
 ) -> anyhow::Result<MenuResult> {
     let mut filter = String::new();
     let mut selected = {
@@ -453,7 +474,12 @@ fn run_select_menu(
         let mut lines = 1usize;
 
         if visible.is_empty() {
-            let empty = fit_line("(tidak ada hasil)", columns.saturating_sub(2));
+            let empty_text = if is_q_back(&filter, q_back) {
+                "Tekan Enter untuk kembali"
+            } else {
+                "(tidak ada hasil)"
+            };
+            let empty = fit_line(empty_text, columns.saturating_sub(2));
             term.write_line(&format!("  {}", style(&empty).dim()))?;
             lines += 1;
         } else {
@@ -533,6 +559,11 @@ fn run_select_menu(
                 selected = first_selectable(entries, &visible);
             }
             Key::Enter => {
+                if is_q_back(&filter, q_back) {
+                    term.clear_last_lines(drawn_lines)?;
+                    term.flush()?;
+                    return Ok(MenuResult::Cancelled);
+                }
                 if let Some(index) = selected {
                     term.clear_last_lines(drawn_lines)?;
                     let final_line = format!("? {} {}", prompt, entries[index].label);
@@ -615,6 +646,15 @@ mod tests {
         ];
         let visible = visible_entries(&entries, "");
         assert_eq!(first_selectable(&entries, &visible), Some(1));
+    }
+
+    #[test]
+    fn q_back_only_triggers_on_exact_q() {
+        assert!(is_q_back("q", true));
+        assert!(is_q_back(" Q ", true));
+        assert!(!is_q_back("qu", true));
+        assert!(!is_q_back("", true));
+        assert!(!is_q_back("q", false));
     }
 
     #[test]
