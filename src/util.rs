@@ -1,93 +1,26 @@
 use std::collections::HashMap;
 use std::future::Future;
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex, OnceLock,
-};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use colored::Colorize;
-use crossterm::{
-    cursor::MoveToColumn,
-    execute,
-    terminal::{Clear, ClearType},
-};
-use dialoguer::{
-    console::{truncate_str, Style},
-    theme::ColorfulTheme,
-};
+use dialoguer::{console::Style, theme::ColorfulTheme};
 
-/// Tiny dependency-free loading spinner. It writes to stderr and disables
-/// itself automatically when output is redirected.
-pub struct Spinner {
-    stop: Arc<AtomicBool>,
-    handle: Option<std::thread::JoinHandle<()>>,
-}
-
-impl Spinner {
-    pub fn start(message: impl Into<String>) -> Self {
-        let stop = Arc::new(AtomicBool::new(false));
-        if !std::io::stderr().is_terminal() {
-            return Self { stop, handle: None };
-        }
-
-        // Leave room for the spinner frame and a space. Long episode titles
-        // used to wrap to a second terminal line, which made every frame look
-        // like a new spinner instead of replacing the previous one.
-        let columns = crossterm::terminal::size()
-            .map(|(columns, _)| columns as usize)
-            .unwrap_or(80)
-            .max(12);
-        let message = truncate_str(&message.into(), columns.saturating_sub(3), "…").into_owned();
-        let stop_flag = stop.clone();
-        let handle = std::thread::spawn(move || {
-            let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-            let mut stderr = std::io::stderr();
-            let mut index = 0usize;
-            while !stop_flag.load(Ordering::Relaxed) {
-                let _ = execute!(stderr, MoveToColumn(0), Clear(ClearType::CurrentLine));
-                let _ = write!(stderr, "{} {}", frames[index % frames.len()], message);
-                let _ = stderr.flush();
-                index += 1;
-                std::thread::sleep(std::time::Duration::from_millis(90));
-            }
-            let _ = execute!(stderr, MoveToColumn(0), Clear(ClearType::CurrentLine));
-            let _ = stderr.flush();
-        });
-
-        Self {
-            stop,
-            handle: Some(handle),
-        }
-    }
-
-    fn finish(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-
-    pub fn stop(mut self) {
-        self.finish();
-    }
-}
-
-impl Drop for Spinner {
-    fn drop(&mut self) {
-        self.finish();
-    }
-}
-
+/// Print a single loading line before waiting for `future`.
+///
+/// This deliberately avoids an animated, carriage-return-based spinner. On
+/// narrow terminals and some emulators every spinner frame still wrapped to a
+/// new line, leaving a trail of duplicate loading messages. A plain line cannot
+/// do that, and the caller prints the result once the future completes.
 pub async fn with_spinner<F, T>(message: impl Into<String>, future: F) -> T
 where
     F: Future<Output = T>,
 {
-    let spinner = Spinner::start(message);
-    let result = future.await;
-    spinner.stop();
-    result
+    if std::io::stderr().is_terminal() {
+        eprintln!("{}", message.into());
+    }
+    future.await
 }
 
 pub fn custom_theme() -> ColorfulTheme {

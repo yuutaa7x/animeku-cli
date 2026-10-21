@@ -99,6 +99,11 @@ cargo uninstall animeku-cli
 
 ### Changelog
 
+#### v0.3.1 — Perbaikan status loading (21 Oktober 2026)
+
+- Mengganti spinner animasi dengan status loading satu baris. Spinner berbasis carriage return masih bisa ter-wrap dan meninggalkan baris duplikat di terminal sempit atau emulator tertentu.
+- Status loading sekarang hanya dicetak sekali, tidak menimpa baris lain, dan hasil operasi tetap muncul setelahnya.
+
 #### v0.3.0 — UX Overhaul & CLI Flags (21 Oktober 2026)
 
 Rilis ini fokus pada kenyamanan navigasi, riwayat, dan kontrol dari terminal.
@@ -129,7 +134,7 @@ Rilis ini fokus pada kenyamanan navigasi, riwayat, dan kontrol dari terminal.
 - Config disimpan sebagai JSON di `dirs::config_dir()/animeku-cli/config.json` (Linux biasanya `~/.config/animeku-cli/config.json`).
 
 ##### Tampilan & Error Handling
-- Spinner loading ringan tanpa dependency tambahan, dengan pesan yang dipotong sesuai lebar terminal agar tidak muncul berulang di terminal sempit.
+- Status loading ringan tanpa dependency tambahan.
 - Error pencarian, daftar episode, dan server stream ditampilkan dengan pesan yang lebih ramah dan kembali ke layar yang sesuai.
 - Banner compact otomatis untuk terminal pendek, plus opsi banner compact di Pengaturan.
 - Poster episode di-cache di memori, diskalakan mengikuti ukuran terminal, dan punya timeout agar tidak menggantung.
