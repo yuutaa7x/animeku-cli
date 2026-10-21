@@ -90,6 +90,7 @@ cargo uninstall animeku-cli
 - Hasil pencarian lengkap dengan pilihan server & resolusi (1080p, 720p, 480p, 360p).
 - Otomatis memuat Subtitle Indonesia langsung ke player.
 - Download episode dengan pilihan kualitas/server, progress bar, nama file kustom, dan folder tujuan.
+- Download batch/rentang episode dengan antrean berurutan, kualitas otomatis mengikuti pilihan awal, retry per episode, dan opsi lewati/timpa file yang sudah ada.
 - Subtitle `.vtt` ikut disimpan di samping video hasil download. Default container: `.mkv` untuk HLS Idlix dan `.mp4` untuk direct Otakudesu.
 - Terintegrasi dengan Discord Rich Presence (RPC).
 - Fitur Riwayat Tontonan multi-entry (menyimpan histori judul & episode yang ditonton).
@@ -104,6 +105,16 @@ cargo uninstall animeku-cli
 - Watchlist untuk menyimpan judul, lalu langsung memilih episode atau melanjutkan tontonan terakhir dari menu utama.
 
 ### Changelog
+
+#### v0.3.7 — Download batch episode (21 Oktober 2026)
+
+- Aksi baru `[ ⬇ Download Batch Episode... ]` di pemilih server/kualitas untuk serial dengan lebih dari satu episode.
+- Pilih rentang episode mulai/sampai, folder tujuan cukup sekali, lalu tentukan kebijakan untuk file yang sudah ada: lewati atau timpa.
+- Kualitas yang dipilih di episode awal dipakai otomatis untuk seluruh batch. Kalau kualitas itu tidak tersedia di salah satu episode, stream pertama dipakai dan muncul peringatan.
+- Setiap episode me-resolve stream tepat sebelum diunduh. Ini penting untuk Idlix karena playlist lokal antar-episode saling menimpa.
+- Antrean berjalan berurutan, mencoba ulang sekali jika download gagal, tetap lanjut ke episode berikutnya, lalu menampilkan ringkasan berhasil/dilewati/gagal.
+- Opsi lewati file yang sudah ada bisa dipakai untuk melanjutkan batch yang terputus tanpa mengunduh ulang episode yang selesai.
+- Setelah batch selesai, aplikasi kembali ke pemilih episode agar stream Idlix yang sudah basi tidak ikut diputar.
 
 #### v0.3.6 — Perbaikan download setelah validasi live (21 Oktober 2026)
 

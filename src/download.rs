@@ -23,6 +23,21 @@ pub enum DownloadOutcome {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExistingFilePolicy {
+    Skip,
+    Overwrite,
+}
+
+impl std::fmt::Display for ExistingFilePolicy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Skip => write!(formatter, "Lewati file yang sudah ada"),
+            Self::Overwrite => write!(formatter, "Timpa file yang sudah ada"),
+        }
+    }
+}
+
 /// Make sure ffmpeg is available before opening the destination prompts.
 pub fn ensure_available() -> Result<()> {
     if crate::check_command_exists("ffmpeg") {
@@ -141,6 +156,22 @@ pub fn download_stream(
     config.download_dir = Some(directory.to_string_lossy().to_string());
     config.save();
 
+    download_to_path(provider_type, stream, &output_path)?;
+
+    Ok(DownloadOutcome::Completed(output_path))
+}
+
+/// Download one already-resolved stream to an explicit path without prompting.
+/// Used by the batch queue after it has chosen the destination folder once.
+pub fn download_to_path(provider_type: usize, stream: &Stream, output_path: &Path) -> Result<()> {
+    ensure_available()?;
+    if output_path.is_dir() {
+        anyhow::bail!(
+            "'{}' adalah folder, bukan nama file yang valid.",
+            output_path.display()
+        );
+    }
+
     let audio = if provider_type == ext::PROVIDER_IDLIX && !util::is_android() {
         let path = util::temp_file("animeku_idlix_audio.m3u8");
         Path::new(&path).is_file().then_some(path)
@@ -159,10 +190,67 @@ pub fn download_stream(
         &stream.url,
         audio.as_deref(),
         subtitle.as_deref(),
-        &output_path,
-    )?;
+        output_path,
+    )
+}
 
-    Ok(DownloadOutcome::Completed(output_path))
+/// Ask for the batch destination once, create it, and remember it as the
+/// default download folder.
+pub fn prompt_batch_directory() -> Result<Option<PathBuf>> {
+    let default_dir = default_download_dir();
+    loop {
+        let Some(dir_input) =
+            prompt_text("Folder tujuan batch", &default_dir.display().to_string())?
+        else {
+            return Ok(None);
+        };
+        let dir_text = if dir_input.trim().is_empty() {
+            default_dir.display().to_string()
+        } else {
+            dir_input.trim().to_string()
+        };
+        let directory = expand_path(&dir_text);
+        if let Err(error) = fs::create_dir_all(&directory) {
+            eprintln!(
+                "{} Gagal membuat folder '{}': {}",
+                "■".red(),
+                directory.display(),
+                error
+            );
+            continue;
+        }
+        if !directory.is_dir() {
+            eprintln!(
+                "{} '{}' bukan folder yang valid.",
+                "■".red(),
+                directory.display()
+            );
+            continue;
+        }
+
+        let mut config = Config::load();
+        config.download_dir = Some(directory.to_string_lossy().to_string());
+        config.save();
+        return Ok(Some(directory));
+    }
+}
+
+pub fn prompt_existing_policy() -> Result<Option<ExistingFilePolicy>> {
+    crate::input::choice(
+        "Jika file sudah ada:",
+        vec![ExistingFilePolicy::Skip, ExistingFilePolicy::Overwrite],
+        0,
+    )
+}
+
+pub fn batch_output_path(
+    provider_type: usize,
+    stream: &Stream,
+    movie: &Movie,
+    episode: &Episode,
+    directory: &Path,
+) -> PathBuf {
+    directory.join(suggested_filename(provider_type, stream, movie, episode))
 }
 
 fn prompt_text(prompt: &str, initial: &str) -> Result<Option<String>> {
@@ -744,6 +832,21 @@ mod tests {
             &episode("Solo Leveling Episode 3 Subtitle Indonesia", true),
         );
         assert_eq!(name, "Solo Leveling - Episode 3.mp4");
+    }
+
+    #[test]
+    fn batch_output_path_uses_episode_filename() {
+        let path = batch_output_path(
+            ext::PROVIDER_OTAKUDESU,
+            &stream("https://example.com/video.mp4"),
+            &movie("Solo Leveling (Episode 1 - 12) Subtitle Indonesia"),
+            &episode("Solo Leveling Episode 3 Subtitle Indonesia", true),
+            Path::new("/tmp/animeku"),
+        );
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/animeku/Solo Leveling - Episode 3.mp4")
+        );
     }
 
     #[test]

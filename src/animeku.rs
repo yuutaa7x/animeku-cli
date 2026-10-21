@@ -25,6 +25,7 @@ pub struct AnimekuCli {
 const SEARCH_SEPARATOR: &str = "────────────────────────";
 const EPISODES_PER_PAGE: usize = 25;
 const PROVIDER_ATTEMPTS: usize = 3;
+const BATCH_DOWNLOAD_ATTEMPTS: usize = 2;
 
 /// Retry transient provider failures before giving up or switching providers.
 /// A short backoff keeps the UI responsive while still smoothing over momentary
@@ -457,6 +458,62 @@ fn select_episode_globally(
         },
         _ => Ok(None),
     }
+}
+
+fn choose_batch_episode(
+    prompt: &str,
+    episodes: &[Episode],
+    default: usize,
+    number_offset: usize,
+) -> anyhow::Result<Option<usize>> {
+    if episodes.is_empty() {
+        return Ok(None);
+    }
+
+    let entries = episodes
+        .iter()
+        .enumerate()
+        .map(|(index, episode)| {
+            input::MenuEntry::new(format!(
+                "{:>3}. {}",
+                number_offset + index + 1,
+                episode.title.trim()
+            ))
+        })
+        .collect::<Vec<_>>();
+    let config = input::MenuConfig {
+        q_back: true,
+        hint: Some("↑↓ pilih • ketik filter • q+Enter/Esc kembali"),
+        ..Default::default()
+    };
+    match input::select_menu_custom(prompt, &entries, default.min(entries.len() - 1), &config)? {
+        input::MenuResult::Selected(index) => Ok(Some(index)),
+        _ => Ok(None),
+    }
+}
+
+fn batch_quality_key(title: &str) -> String {
+    let trimmed = title.trim();
+    let Some(hash) = trimmed.rfind(" #") else {
+        return trimmed.to_string();
+    };
+    let after = &trimmed[hash + 2..];
+    let Some(end) = after.find(']') else {
+        return trimmed.to_string();
+    };
+
+    let mut key = String::with_capacity(trimmed.len());
+    key.push_str(&trimmed[..hash]);
+    key.push_str(&after[end..]);
+    key
+}
+
+fn choose_batch_stream<'a>(streams: &'a [Stream], target_title: &str) -> Option<&'a Stream> {
+    let target = batch_quality_key(target_title);
+    streams
+        .iter()
+        .find(|stream| batch_quality_key(&stream.title) == target)
+        .or_else(|| streams.first())
 }
 
 impl AnimekuCli {
@@ -1280,6 +1337,177 @@ impl AnimekuCli {
         }
     }
 
+    async fn download_batch(
+        &self,
+        movie: &Movie,
+        episodes: &[Episode],
+        current_index: usize,
+        target_title: &str,
+    ) -> anyhow::Result<bool> {
+        let Some(start) =
+            choose_batch_episode("Mulai batch dari episode:", episodes, current_index, 0)?
+        else {
+            return Ok(false);
+        };
+
+        let remaining = &episodes[start..];
+        let Some(end_offset) =
+            choose_batch_episode("Sampai episode:", remaining, remaining.len() - 1, start)?
+        else {
+            return Ok(false);
+        };
+        let end = start + end_offset;
+        let range = &episodes[start..=end];
+        let count = range.len();
+
+        let Some(directory) = crate::download::prompt_batch_directory()? else {
+            return Ok(false);
+        };
+        let Some(existing) = crate::download::prompt_existing_policy()? else {
+            return Ok(false);
+        };
+
+        if !crate::confirm_action(&format!(
+            "Download {} episode ({} s/d {}) ke '{}'?",
+            count,
+            episodes[start].title.trim(),
+            episodes[end].title.trim(),
+            directory.display()
+        ))? {
+            return Ok(false);
+        }
+
+        println!(
+            "\n{} Batch download: {} episode • kualitas '{}' • folder '{}'",
+            "◆".blue(),
+            count,
+            target_title.cyan(),
+            directory.display()
+        );
+
+        let mut completed = 0usize;
+        let mut skipped = 0usize;
+        let mut failed = 0usize;
+
+        for (offset, episode) in range.iter().enumerate() {
+            println!(
+                "\n{} [{}/{}] {}",
+                "◆".blue(),
+                offset + 1,
+                count,
+                episode.title.trim()
+            );
+
+            let streams = match retry_streams(self.extractor.as_ref(), episode).await {
+                Ok(streams) if !streams.is_empty() => streams,
+                Ok(_) => {
+                    eprintln!("{} Server stream kosong.", "■".red());
+                    failed += 1;
+                    continue;
+                }
+                Err(error) => {
+                    eprintln!("{} Gagal memuat stream: {:#}", "■".red(), error);
+                    failed += 1;
+                    continue;
+                }
+            };
+
+            let Some(stream) = choose_batch_stream(&streams, target_title) else {
+                eprintln!("{} Server stream kosong.", "■".red());
+                failed += 1;
+                continue;
+            };
+            if batch_quality_key(&stream.title) != batch_quality_key(target_title) {
+                println!(
+                    "{} Kualitas '{}' tidak tersedia, memakai '{}'.",
+                    "ℹ".blue(),
+                    target_title,
+                    stream.title
+                );
+            }
+
+            let output = crate::download::batch_output_path(
+                self.provider_type,
+                stream,
+                movie,
+                episode,
+                &directory,
+            );
+            if output.is_dir() {
+                eprintln!(
+                    "{} '{}' adalah folder, bukan nama file yang valid.",
+                    "■".red(),
+                    output.display()
+                );
+                failed += 1;
+                continue;
+            }
+            if output.exists() {
+                match existing {
+                    crate::download::ExistingFilePolicy::Skip => {
+                        println!("{} Dilewati: file sudah ada.", "↷".yellow());
+                        skipped += 1;
+                        continue;
+                    }
+                    crate::download::ExistingFilePolicy::Overwrite => {}
+                }
+            }
+
+            let mut downloaded = false;
+            for attempt in 1..=BATCH_DOWNLOAD_ATTEMPTS {
+                match crate::download::download_to_path(self.provider_type, stream, &output) {
+                    Ok(()) => {
+                        downloaded = true;
+                        break;
+                    }
+                    Err(error) if attempt < BATCH_DOWNLOAD_ATTEMPTS => {
+                        eprintln!(
+                            "{} Download gagal (percobaan {}/{}): {:#}. Mencoba ulang...",
+                            "■".red(),
+                            attempt,
+                            BATCH_DOWNLOAD_ATTEMPTS,
+                            error
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "{} Download gagal setelah {} percobaan: {:#}",
+                            "■".red(),
+                            BATCH_DOWNLOAD_ATTEMPTS,
+                            error
+                        );
+                    }
+                }
+            }
+
+            if downloaded {
+                completed += 1;
+            } else {
+                failed += 1;
+            }
+        }
+
+        println!(
+            "\n{} Batch selesai: {} berhasil • {} dilewati • {} gagal.",
+            if failed == 0 {
+                "✓".green()
+            } else {
+                "■".yellow()
+            },
+            completed,
+            skipped,
+            failed
+        );
+        if failed > 0 {
+            println!(
+                "  Jalankan batch lagi dengan opsi lewati file yang sudah ada untuk melanjutkan yang gagal."
+            );
+        }
+
+        Ok(true)
+    }
+
     pub async fn extract_stream_urls(
         &mut self,
         episode: Episode,
@@ -1370,6 +1598,20 @@ impl AnimekuCli {
         let mut watchlisted = active_movie.as_ref().is_some_and(|movie| {
             input::is_in_watchlist(active_provider, &movie.id)
         });
+        let batch_episodes = active_movie
+            .as_ref()
+            .and_then(|movie| self.get_episode_list(&movie.id))
+            .unwrap_or_default();
+        let batch_current_index = self
+            .current_episode
+            .as_ref()
+            .and_then(|episode| batch_episodes.iter().position(|item| item.id == episode.id))
+            .unwrap_or(0);
+        let can_batch = batch_episodes.len() > 1
+            && self
+                .current_episode
+                .as_ref()
+                .is_some_and(|episode| episode.is_series);
 
         loop {
             let mut opts = streams.clone();
@@ -1377,6 +1619,12 @@ impl AnimekuCli {
                 url: "download".into(),
                 title: "[ ⬇ Download Episode Ini ]".into(),
             });
+            if can_batch {
+                opts.push(Stream {
+                    url: "download_batch".into(),
+                    title: "[ ⬇ Download Batch Episode... ]".into(),
+                });
+            }
             if active_movie.is_some() {
                 opts.push(Stream {
                     url: "watchlist".into(),
@@ -1434,6 +1682,49 @@ impl AnimekuCli {
                     }
                 }
                 continue;
+            }
+
+            if selected.url == "download_batch" {
+                if let Err(error) = crate::download::ensure_available() {
+                    eprintln!("{} {:#}", "■".red(), error);
+                    println!();
+                    println!("Tekan Enter untuk kembali...");
+                    let mut dummy = String::new();
+                    let _ = std::io::stdin().read_line(&mut dummy);
+                    continue;
+                }
+
+                let Some(download_stream) =
+                    input::choice("Pilih Kualitas untuk Batch:", streams.clone(), 0)?
+                else {
+                    continue;
+                };
+                let Some(movie) = active_movie.clone() else {
+                    continue;
+                };
+
+                match self
+                    .download_batch(
+                        &movie,
+                        &batch_episodes,
+                        batch_current_index,
+                        &download_stream.title,
+                    )
+                    .await
+                {
+                    // Idlix's local playlists are overwritten by every batch
+                    // item, so the streams still held by this picker are stale.
+                    Ok(true) => return Ok(None),
+                    Ok(false) => continue,
+                    Err(error) => {
+                        eprintln!("{} Batch download gagal: {:#}", "■".red(), error);
+                        println!();
+                        println!("Tekan Enter untuk kembali...");
+                        let mut dummy = String::new();
+                        let _ = std::io::stdin().read_line(&mut dummy);
+                        continue;
+                    }
+                }
             }
 
             if selected.url == "watchlist" {
@@ -1841,5 +2132,29 @@ mod tests {
                 .count(),
             30
         );
+    }
+
+    #[test]
+    fn batch_stream_prefers_requested_quality_then_falls_back_to_first() {
+        let streams = vec![
+            Stream {
+                url: "1080".into(),
+                title: "Idlix [1080p]".into(),
+            },
+            Stream {
+                url: "720".into(),
+                title: "Idlix [720p]".into(),
+            },
+        ];
+
+        assert_eq!(
+            choose_batch_stream(&streams, "Idlix [720p #2]").map(|stream| stream.url.as_str()),
+            Some("720")
+        );
+        assert_eq!(
+            choose_batch_stream(&streams, "Idlix [480p]").map(|stream| stream.url.as_str()),
+            Some("1080")
+        );
+        assert!(choose_batch_stream(&[], "Idlix [720p]").is_none());
     }
 }
