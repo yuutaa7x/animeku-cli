@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 use colored::Colorize;
 
@@ -514,6 +516,60 @@ fn choose_batch_stream<'a>(streams: &'a [Stream], target_title: &str) -> Option<
         .iter()
         .find(|stream| batch_quality_key(&stream.title) == target)
         .or_else(|| streams.first())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchItemOutcome {
+    Completed,
+    Skipped,
+    Failed,
+    Cancelled,
+}
+
+fn batch_eta(done: usize, total: usize, elapsed: Duration) -> String {
+    if done == 0 {
+        "—".to_string()
+    } else if done >= total {
+        "00:00".to_string()
+    } else {
+        let per_item = elapsed.as_secs_f64() / done as f64;
+        let remaining = per_item * (total - done) as f64;
+        crate::models::format_seconds(remaining.round() as u64)
+    }
+}
+
+fn format_batch_status(
+    done: usize,
+    total: usize,
+    completed: usize,
+    skipped: usize,
+    failed: usize,
+    elapsed: Duration,
+) -> String {
+    format!(
+        "Batch {}/{} • {} berhasil • {} dilewati • {} gagal • sisa ~{}",
+        done,
+        total,
+        completed,
+        skipped,
+        failed,
+        batch_eta(done, total, elapsed)
+    )
+}
+
+fn print_batch_status(
+    done: usize,
+    total: usize,
+    completed: usize,
+    skipped: usize,
+    failed: usize,
+    started: Instant,
+) {
+    println!(
+        "  {} {}",
+        "•".dimmed(),
+        format_batch_status(done, total, completed, skipped, failed, started.elapsed())
+    );
 }
 
 impl AnimekuCli {
@@ -1337,6 +1393,96 @@ impl AnimekuCli {
         }
     }
 
+    async fn download_batch_episode(
+        &self,
+        movie: &Movie,
+        episode: &Episode,
+        target_title: &str,
+        directory: &Path,
+        existing: crate::download::ExistingFilePolicy,
+    ) -> BatchItemOutcome {
+        let streams = match retry_streams(self.extractor.as_ref(), episode).await {
+            Ok(streams) if !streams.is_empty() => streams,
+            Ok(_) => {
+                eprintln!("{} Server stream kosong.", "■".red());
+                return BatchItemOutcome::Failed;
+            }
+            Err(error) => {
+                eprintln!("{} Gagal memuat stream: {:#}", "■".red(), error);
+                return BatchItemOutcome::Failed;
+            }
+        };
+
+        let Some(stream) = choose_batch_stream(&streams, target_title) else {
+            eprintln!("{} Server stream kosong.", "■".red());
+            return BatchItemOutcome::Failed;
+        };
+        if batch_quality_key(&stream.title) != batch_quality_key(target_title) {
+            println!(
+                "{} Kualitas '{}' tidak tersedia, memakai '{}'.",
+                "ℹ".blue(),
+                target_title,
+                stream.title
+            );
+        }
+
+        let output = crate::download::batch_output_path(
+            self.provider_type,
+            stream,
+            movie,
+            episode,
+            directory,
+        );
+        if output.is_dir() {
+            eprintln!(
+                "{} '{}' adalah folder, bukan nama file yang valid.",
+                "■".red(),
+                output.display()
+            );
+            return BatchItemOutcome::Failed;
+        }
+        if output.exists() {
+            match existing {
+                crate::download::ExistingFilePolicy::Skip => {
+                    println!("{} Dilewati: file sudah ada.", "↷".yellow());
+                    return BatchItemOutcome::Skipped;
+                }
+                crate::download::ExistingFilePolicy::Overwrite => {}
+            }
+        }
+
+        for attempt in 1..=BATCH_DOWNLOAD_ATTEMPTS {
+            match crate::download::download_to_path(self.provider_type, stream, &output) {
+                Ok(crate::download::DownloadResult::Completed) => {
+                    return BatchItemOutcome::Completed;
+                }
+                Ok(crate::download::DownloadResult::Cancelled) => {
+                    return BatchItemOutcome::Cancelled;
+                }
+                Err(error) if attempt < BATCH_DOWNLOAD_ATTEMPTS => {
+                    eprintln!(
+                        "{} Download gagal (percobaan {}/{}): {:#}. Mencoba ulang...",
+                        "■".red(),
+                        attempt,
+                        BATCH_DOWNLOAD_ATTEMPTS,
+                        error
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                Err(error) => {
+                    eprintln!(
+                        "{} Download gagal setelah {} percobaan: {:#}",
+                        "■".red(),
+                        BATCH_DOWNLOAD_ATTEMPTS,
+                        error
+                    );
+                }
+            }
+        }
+
+        BatchItemOutcome::Failed
+    }
+
     async fn download_batch(
         &self,
         movie: &Movie,
@@ -1385,11 +1531,14 @@ impl AnimekuCli {
             directory.display()
         );
 
+        let started = Instant::now();
         let mut completed = 0usize;
         let mut skipped = 0usize;
         let mut failed = 0usize;
+        let mut processed = 0usize;
+        let mut cancelled = false;
 
-        for (offset, episode) in range.iter().enumerate() {
+        'batch: for (offset, episode) in range.iter().enumerate() {
             println!(
                 "\n{} [{}/{}] {}",
                 "◆".blue(),
@@ -1398,111 +1547,59 @@ impl AnimekuCli {
                 episode.title.trim()
             );
 
-            let streams = match retry_streams(self.extractor.as_ref(), episode).await {
-                Ok(streams) if !streams.is_empty() => streams,
-                Ok(_) => {
-                    eprintln!("{} Server stream kosong.", "■".red());
-                    failed += 1;
-                    continue;
-                }
-                Err(error) => {
-                    eprintln!("{} Gagal memuat stream: {:#}", "■".red(), error);
-                    failed += 1;
-                    continue;
-                }
-            };
+            let outcome = self
+                .download_batch_episode(movie, episode, target_title, &directory, existing)
+                .await;
 
-            let Some(stream) = choose_batch_stream(&streams, target_title) else {
-                eprintln!("{} Server stream kosong.", "■".red());
-                failed += 1;
-                continue;
-            };
-            if batch_quality_key(&stream.title) != batch_quality_key(target_title) {
-                println!(
-                    "{} Kualitas '{}' tidak tersedia, memakai '{}'.",
-                    "ℹ".blue(),
-                    target_title,
-                    stream.title
-                );
-            }
-
-            let output = crate::download::batch_output_path(
-                self.provider_type,
-                stream,
-                movie,
-                episode,
-                &directory,
-            );
-            if output.is_dir() {
-                eprintln!(
-                    "{} '{}' adalah folder, bukan nama file yang valid.",
-                    "■".red(),
-                    output.display()
-                );
-                failed += 1;
-                continue;
-            }
-            if output.exists() {
-                match existing {
-                    crate::download::ExistingFilePolicy::Skip => {
-                        println!("{} Dilewati: file sudah ada.", "↷".yellow());
-                        skipped += 1;
-                        continue;
-                    }
-                    crate::download::ExistingFilePolicy::Overwrite => {}
+            match outcome {
+                BatchItemOutcome::Completed => completed += 1,
+                BatchItemOutcome::Skipped => skipped += 1,
+                BatchItemOutcome::Failed => failed += 1,
+                BatchItemOutcome::Cancelled => {
+                    cancelled = true;
+                    break 'batch;
                 }
             }
 
-            let mut downloaded = false;
-            for attempt in 1..=BATCH_DOWNLOAD_ATTEMPTS {
-                match crate::download::download_to_path(self.provider_type, stream, &output) {
-                    Ok(()) => {
-                        downloaded = true;
-                        break;
-                    }
-                    Err(error) if attempt < BATCH_DOWNLOAD_ATTEMPTS => {
-                        eprintln!(
-                            "{} Download gagal (percobaan {}/{}): {:#}. Mencoba ulang...",
-                            "■".red(),
-                            attempt,
-                            BATCH_DOWNLOAD_ATTEMPTS,
-                            error
-                        );
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    }
-                    Err(error) => {
-                        eprintln!(
-                            "{} Download gagal setelah {} percobaan: {:#}",
-                            "■".red(),
-                            BATCH_DOWNLOAD_ATTEMPTS,
-                            error
-                        );
-                    }
-                }
-            }
-
-            if downloaded {
-                completed += 1;
-            } else {
-                failed += 1;
+            processed += 1;
+            if processed < count {
+                print_batch_status(processed, count, completed, skipped, failed, started);
             }
         }
 
-        println!(
-            "\n{} Batch selesai: {} berhasil • {} dilewati • {} gagal.",
-            if failed == 0 {
-                "✓".green()
-            } else {
-                "■".yellow()
-            },
-            completed,
-            skipped,
-            failed
-        );
-        if failed > 0 {
+        let elapsed = started.elapsed().as_secs();
+        if cancelled {
+            let remaining = count.saturating_sub(processed);
             println!(
-                "  Jalankan batch lagi dengan opsi lewati file yang sudah ada untuk melanjutkan yang gagal."
+                "\n{} Batch dihentikan: {} berhasil • {} dilewati • {} gagal • {} belum diproses ({}).",
+                "■".yellow(),
+                completed,
+                skipped,
+                failed,
+                remaining,
+                crate::models::format_seconds(elapsed)
             );
+            println!(
+                "  Jalankan batch lagi dengan opsi lewati file yang sudah ada untuk melanjutkan."
+            );
+        } else {
+            println!(
+                "\n{} Batch selesai: {} berhasil • {} dilewati • {} gagal • total {}.",
+                if failed == 0 {
+                    "✓".green()
+                } else {
+                    "■".yellow()
+                },
+                completed,
+                skipped,
+                failed,
+                crate::models::format_seconds(elapsed)
+            );
+            if failed > 0 {
+                println!(
+                    "  Jalankan batch lagi dengan opsi lewati file yang sudah ada untuk melanjutkan yang gagal."
+                );
+            }
         }
 
         Ok(true)
@@ -2156,5 +2253,16 @@ mod tests {
             Some("1080")
         );
         assert!(choose_batch_stream(&[], "Idlix [720p]").is_none());
+    }
+
+    #[test]
+    fn batch_status_reports_counts_and_eta() {
+        let status = format_batch_status(3, 12, 2, 1, 0, Duration::from_secs(90));
+        assert_eq!(
+            status,
+            "Batch 3/12 • 2 berhasil • 1 dilewati • 0 gagal • sisa ~04:30"
+        );
+        assert_eq!(batch_eta(0, 12, Duration::ZERO), "—");
+        assert_eq!(batch_eta(12, 12, Duration::from_secs(90)), "00:00");
     }
 }

@@ -90,7 +90,8 @@ cargo uninstall animeku-cli
 - Hasil pencarian lengkap dengan pilihan server & resolusi (1080p, 720p, 480p, 360p).
 - Otomatis memuat Subtitle Indonesia langsung ke player.
 - Download episode dengan pilihan kualitas/server, progress bar, nama file kustom, dan folder tujuan.
-- Download batch/rentang episode dengan antrean berurutan, kualitas otomatis mengikuti pilihan awal, retry per episode, dan opsi lewati/timpa file yang sudah ada.
+- Download batch/rentang episode dengan antrean berurutan, kualitas otomatis mengikuti pilihan awal, retry per episode, progres keseluruhan + estimasi sisa waktu, dan opsi lewati/timpa file yang sudah ada.
+- Download bisa dibatalkan dengan `Esc`, `q`, atau `Ctrl+C`; ffmpeg dihentikan, file `.part` dibersihkan, dan ringkasan parsial ditampilkan.
 - Subtitle `.vtt` ikut disimpan di samping video hasil download. Default container: `.mkv` untuk HLS Idlix dan `.mp4` untuk direct Otakudesu.
 - Terintegrasi dengan Discord Rich Presence (RPC).
 - Fitur Riwayat Tontonan multi-entry (menyimpan histori judul & episode yang ditonton).
@@ -105,6 +106,13 @@ cargo uninstall animeku-cli
 - Watchlist untuk menyimpan judul, lalu langsung memilih episode atau melanjutkan tontonan terakhir dari menu utama.
 
 ### Changelog
+
+#### v0.3.8 — Progres batch & pembatalan download (21 Oktober 2026)
+
+- Progres keseluruhan batch sekarang menampilkan posisi `Batch x/y`, jumlah berhasil/dilewati/gagal, dan estimasi sisa waktu setelah tiap episode selesai diproses.
+- Download episode maupun batch bisa dibatalkan dengan `Esc`, `q`, atau `Ctrl+C`. ffmpeg langsung dihentikan, file `.part` dihapus, dan batch berhenti tanpa melanjutkan episode berikutnya.
+- Saat batch dibatalkan, ringkasan parsial menampilkan jumlah episode yang sudah diproses dan berapa yang belum diproses, lalu kembali ke pemilih episode.
+- Retry per episode tetap berjalan, tetapi pembatalan tidak memicu retry dan tidak meninggalkan file setengah jadi.
 
 #### v0.3.7 — Download batch episode (21 Oktober 2026)
 

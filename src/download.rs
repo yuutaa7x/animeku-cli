@@ -2,11 +2,16 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc, OnceLock,
+};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use colored::Colorize;
+use crossterm::event::{self, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
 use crate::config::Config;
 use crate::ext::{self, idlix, otakudesu, CHROME_USER_AGENT};
@@ -20,6 +25,12 @@ const MAX_FILENAME_BYTES: usize = 200;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DownloadOutcome {
     Completed(PathBuf),
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadResult {
+    Completed,
     Cancelled,
 }
 
@@ -156,14 +167,19 @@ pub fn download_stream(
     config.download_dir = Some(directory.to_string_lossy().to_string());
     config.save();
 
-    download_to_path(provider_type, stream, &output_path)?;
-
-    Ok(DownloadOutcome::Completed(output_path))
+    match download_to_path(provider_type, stream, &output_path)? {
+        DownloadResult::Completed => Ok(DownloadOutcome::Completed(output_path)),
+        DownloadResult::Cancelled => Ok(DownloadOutcome::Cancelled),
+    }
 }
 
 /// Download one already-resolved stream to an explicit path without prompting.
 /// Used by the batch queue after it has chosen the destination folder once.
-pub fn download_to_path(provider_type: usize, stream: &Stream, output_path: &Path) -> Result<()> {
+pub fn download_to_path(
+    provider_type: usize,
+    stream: &Stream,
+    output_path: &Path,
+) -> Result<DownloadResult> {
     ensure_available()?;
     if output_path.is_dir() {
         anyhow::bail!(
@@ -547,13 +563,85 @@ fn build_ffmpeg_command(
     command
 }
 
+struct DownloadControl {
+    cancel: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl DownloadControl {
+    fn start() -> Option<Self> {
+        if enable_raw_mode().is_err() {
+            return None;
+        }
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let cancel_thread = Arc::clone(&cancel);
+        let stop_thread = Arc::clone(&stop);
+        let handle = match std::thread::Builder::new()
+            .name("animeku-download-input".into())
+            .spawn(move || {
+                while !stop_thread.load(Ordering::Relaxed) {
+                    match event::poll(Duration::from_millis(100)) {
+                        Ok(true) => {}
+                        Ok(false) => continue,
+                        Err(_) => break,
+                    }
+
+                    let Ok(event::Event::Key(key)) = event::read() else {
+                        continue;
+                    };
+                    if key.kind == KeyEventKind::Release {
+                        continue;
+                    }
+
+                    let cancel_key = key.code == KeyCode::Esc
+                        || key.code == KeyCode::Char('q')
+                        || key.code == KeyCode::Char('Q')
+                        || (key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL));
+                    if cancel_key {
+                        cancel_thread.store(true, Ordering::SeqCst);
+                    }
+                }
+            }) {
+            Ok(handle) => handle,
+            Err(_) => {
+                let _ = disable_raw_mode();
+                return None;
+            }
+        };
+
+        Some(Self {
+            cancel,
+            stop,
+            handle: Some(handle),
+        })
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for DownloadControl {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        let _ = disable_raw_mode();
+    }
+}
+
 fn run_ffmpeg(
     provider_type: usize,
     url: &str,
     audio: Option<&str>,
     subtitle: Option<&str>,
     output: &Path,
-) -> Result<()> {
+) -> Result<DownloadResult> {
     let duration = probe_duration(provider_type, url);
     let partial = partial_path(output);
     if partial.exists() {
@@ -561,8 +649,12 @@ fn run_ffmpeg(
     }
 
     println!("{} Mengunduh dengan ffmpeg...", "◆".blue());
+    println!("  {} Tekan Esc/q/Ctrl+C untuk membatalkan.", "•".dimmed());
     let mut command = build_ffmpeg_command(provider_type, url, audio, &partial);
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     let mut child = command
         .spawn()
@@ -588,35 +680,58 @@ fn run_ffmpeg(
         .stdout
         .take()
         .context("gagal membaca progres ffmpeg")?;
+    let (progress_tx, progress_rx) = mpsc::channel();
+    let stdout_handle = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if progress_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let control = DownloadControl::start();
     let mut out_seconds = 0.0_f64;
     let mut out_time_us_seen = false;
     let mut total_size = 0_u64;
     let mut speed = String::new();
     let mut finished = false;
+    let mut cancelled = false;
     let mut last_draw = Instant::now() - Duration::from_secs(1);
 
-    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-        if let Some(value) = line.strip_prefix("out_time_us=") {
-            if let Ok(microseconds) = value.trim().parse::<f64>() {
-                out_seconds = microseconds / 1_000_000.0;
-                out_time_us_seen = true;
-            }
-        } else if let Some(value) = line.strip_prefix("out_time_ms=") {
-            if !out_time_us_seen {
-                if let Ok(microseconds) = value.trim().parse::<f64>() {
-                    out_seconds = microseconds / 1_000_000.0;
+    loop {
+        match progress_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(line) => {
+                if let Some(value) = line.strip_prefix("out_time_us=") {
+                    if let Ok(microseconds) = value.trim().parse::<f64>() {
+                        out_seconds = microseconds / 1_000_000.0;
+                        out_time_us_seen = true;
+                    }
+                } else if let Some(value) = line.strip_prefix("out_time_ms=") {
+                    if !out_time_us_seen {
+                        if let Ok(microseconds) = value.trim().parse::<f64>() {
+                            out_seconds = microseconds / 1_000_000.0;
+                        }
+                    }
+                } else if let Some(value) = line.strip_prefix("out_time=") {
+                    if !out_time_us_seen {
+                        out_seconds = parse_ffmpeg_time(value.trim()).unwrap_or(out_seconds);
+                    }
+                } else if let Some(value) = line.strip_prefix("total_size=") {
+                    total_size = value.trim().parse::<u64>().unwrap_or(total_size);
+                } else if let Some(value) = line.strip_prefix("speed=") {
+                    speed = value.trim().to_string();
+                } else if line.starts_with("progress=end") {
+                    finished = true;
                 }
             }
-        } else if let Some(value) = line.strip_prefix("out_time=") {
-            if !out_time_us_seen {
-                out_seconds = parse_ffmpeg_time(value.trim()).unwrap_or(out_seconds);
-            }
-        } else if let Some(value) = line.strip_prefix("total_size=") {
-            total_size = value.trim().parse::<u64>().unwrap_or(total_size);
-        } else if let Some(value) = line.strip_prefix("speed=") {
-            speed = value.trim().to_string();
-        } else if line.starts_with("progress=end") {
-            finished = true;
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+
+        if control.as_ref().is_some_and(|control| control.cancelled()) {
+            cancelled = true;
+            let _ = child.kill();
+            break;
         }
 
         if last_draw.elapsed() >= Duration::from_millis(250) {
@@ -625,9 +740,25 @@ fn run_ffmpeg(
         }
     }
 
-    let status = child.wait().context("gagal menunggu ffmpeg")?;
+    if control.as_ref().is_some_and(|control| control.cancelled()) {
+        cancelled = true;
+    }
+    if cancelled {
+        let _ = child.kill();
+    }
+
+    let status_result = child.wait().context("gagal menunggu ffmpeg");
+    drop(control);
     let error_lines = stderr_handle.join().unwrap_or_default();
+    let _ = stdout_handle.join();
     clear_progress_line();
+    let status = status_result?;
+
+    if cancelled {
+        let _ = fs::remove_file(&partial);
+        println!("{} Download dibatalkan.", "■".yellow());
+        return Ok(DownloadResult::Cancelled);
+    }
 
     if !status.success() {
         let _ = fs::remove_file(&partial);
@@ -676,7 +807,7 @@ fn run_ffmpeg(
         copy_subtitle(Path::new(subtitle), output);
     }
 
-    Ok(())
+    Ok(DownloadResult::Completed)
 }
 
 fn parse_ffmpeg_time(value: &str) -> Option<f64> {
