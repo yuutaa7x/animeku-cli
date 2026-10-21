@@ -8,7 +8,15 @@ use std::sync::{
 };
 
 use colored::Colorize;
-use dialoguer::{console::Style, theme::ColorfulTheme};
+use crossterm::{
+    cursor::MoveToColumn,
+    execute,
+    terminal::{Clear, ClearType},
+};
+use dialoguer::{
+    console::{truncate_str, Style},
+    theme::ColorfulTheme,
+};
 
 /// Tiny dependency-free loading spinner. It writes to stderr and disables
 /// itself automatically when output is redirected.
@@ -24,20 +32,28 @@ impl Spinner {
             return Self { stop, handle: None };
         }
 
-        let message = message.into();
-        let clear_width = message.chars().count() + 3;
+        // Leave room for the spinner frame and a space. Long episode titles
+        // used to wrap to a second terminal line, which made every frame look
+        // like a new spinner instead of replacing the previous one.
+        let columns = crossterm::terminal::size()
+            .map(|(columns, _)| columns as usize)
+            .unwrap_or(80)
+            .max(12);
+        let message = truncate_str(&message.into(), columns.saturating_sub(3), "…").into_owned();
         let stop_flag = stop.clone();
         let handle = std::thread::spawn(move || {
             let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let mut stderr = std::io::stderr();
             let mut index = 0usize;
             while !stop_flag.load(Ordering::Relaxed) {
-                eprint!("\r{} {}", frames[index % frames.len()], message);
-                let _ = std::io::stderr().flush();
+                let _ = execute!(stderr, MoveToColumn(0), Clear(ClearType::CurrentLine));
+                let _ = write!(stderr, "{} {}", frames[index % frames.len()], message);
+                let _ = stderr.flush();
                 index += 1;
                 std::thread::sleep(std::time::Duration::from_millis(90));
             }
-            eprint!("\r{}\r", " ".repeat(clear_width));
-            let _ = std::io::stderr().flush();
+            let _ = execute!(stderr, MoveToColumn(0), Clear(ClearType::CurrentLine));
+            let _ = stderr.flush();
         });
 
         Self {

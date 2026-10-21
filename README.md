@@ -129,7 +129,7 @@ Rilis ini fokus pada kenyamanan navigasi, riwayat, dan kontrol dari terminal.
 - Config disimpan sebagai JSON di `dirs::config_dir()/animeku-cli/config.json` (Linux biasanya `~/.config/animeku-cli/config.json`).
 
 ##### Tampilan & Error Handling
-- Spinner loading ringan tanpa dependency tambahan.
+- Spinner loading ringan tanpa dependency tambahan, dengan pesan yang dipotong sesuai lebar terminal agar tidak muncul berulang di terminal sempit.
 - Error pencarian, daftar episode, dan server stream ditampilkan dengan pesan yang lebih ramah dan kembali ke layar yang sesuai.
 - Banner compact otomatis untuk terminal pendek, plus opsi banner compact di Pengaturan.
 - Poster episode di-cache di memori, diskalakan mengikuti ukuran terminal, dan punya timeout agar tidak menggantung.
