@@ -89,6 +89,24 @@ jobs:
             (cd dist && shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256")
           fi
 
+      - name: Smoke test packaged binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & "dist/${{ matrix.asset }}" --version
+
+      - name: Smoke test packaged binary (Unix)
+        if: runner.os != 'Windows' && !matrix.cross
+        shell: bash
+        run: |
+          "./dist/${{ matrix.asset }}" --version
+
+      - name: Smoke test cross-built binary
+        if: matrix.cross
+        shell: bash
+        run: |
+          cross run --release --locked --target ${{ matrix.target }} -- --version
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:

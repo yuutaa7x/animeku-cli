@@ -1,0 +1,16 @@
+{
+  "results": [
+    {
+      "contentType": "tv_series",
+      "slug": "sousou-no-frieren",
+      "title": "Sousou no Frieren",
+      "numberOfSeasons": 2
+    },
+    {
+      "contentType": "movie",
+      "slug": "suzume",
+      "title": "Suzume",
+      "quality": "1080p"
+    }
+  ]
+}

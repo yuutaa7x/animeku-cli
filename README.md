@@ -146,12 +146,20 @@ Untuk Windows, hapus `animeku-cli.exe` dan `animeku.exe` dari `%USERPROFILE%\.ca
 - Dukungan CLI flags untuk pencarian langsung, resume, update, cek update, pemilihan provider/player, dan menonaktifkan RPC.
 - Pengecekan dependensi dan Check Health sistem yang interaktif.
 - Retry otomatis dan fallback Idlix ↔ Otakudesu saat provider error atau tidak mengembalikan hasil.
+- Request ke provider dibatasi otomatis (default 350ms) agar tidak membanjiri situs. Bisa diubah lewat `ANIMEKU_RATE_LIMIT_MS`.
 - Cache metadata persisten untuk hasil pencarian dan daftar episode, sehingga pencarian ulang lebih cepat tanpa mengambil stream lama.
 - Watchlist untuk menyimpan judul, lalu langsung memilih episode atau melanjutkan tontonan terakhir dari menu utama.
 - **Cek Episode Baru** di watchlist menyimpan jumlah episode terakhir dan memberi notifikasi berapa episode baru yang tersedia. Dari detail watchlist kamu juga bisa langsung **Download Episode Baru** sebagai batch.
 - **Jelajahi anime (AniList)** menampilkan trending anime, skor, tahun, genre, dan sinopsis. Detail AniList juga bisa dibuka dari watchlist.
 
 ### Changelog
+
+#### v0.4.2 — Update safety, smoke test rilis & rate limit provider (21 Oktober 2026)
+
+- Self-update sekarang menjalankan binary baru dengan `--version` sebelum mengganti binary lama, membuat backup, dan otomatis rollback jika binary hasil pemasangan gagal dijalankan. Unit test mencakup kasus pre-check gagal dan rollback.
+- Workflow rilis melakukan smoke test pada setiap asset sebelum publish: Windows, Linux x86_64, Linux aarch64 (via cross/QEMU), macOS Intel, dan macOS Apple Silicon.
+- Request provider dibatasi otomatis dengan interval default 350ms. Override lewat `ANIMEKU_RATE_LIMIT_MS`.
+- Ditambahkan fixture test untuk parser Otakudesu (HTML pencarian, daftar episode, halaman stream) dan Idlix (JSON pencarian, movie, series, season).
 
 #### v0.4.1 — Perbaikan urutan episode baru lintas season (21 Oktober 2026)
 

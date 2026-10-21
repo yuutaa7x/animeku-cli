@@ -61,6 +61,7 @@ fn check_curl_available() -> anyhow::Result<()> {
 
 fn curl_get(url: &str) -> anyhow::Result<String> {
     check_curl_available()?;
+    crate::ext::wait_for_provider_blocking(crate::ext::PROVIDER_IDLIX);
     let cookie_path = cookie_cache_path();
     let _ = crate::util::ensure_private_file(&cookie_path);
     let args = vec![
@@ -94,6 +95,7 @@ fn curl_get(url: &str) -> anyhow::Result<String> {
 
 fn curl_post(url: &str, body: &Value) -> anyhow::Result<String> {
     check_curl_available()?;
+    crate::ext::wait_for_provider_blocking(crate::ext::PROVIDER_IDLIX);
     let cookie_path = cookie_cache_path();
     let _ = crate::util::ensure_private_file(&cookie_path);
     let args = vec![
@@ -143,6 +145,135 @@ impl Idlix {
     }
 }
 
+fn parse_search_json(json: &Value) -> Vec<Movie> {
+    let mut movies = vec![];
+    let Some(results) = json["results"].as_array() else {
+        return movies;
+    };
+
+    for item in results {
+        let content_type = item["contentType"].as_str().unwrap_or("movie");
+        let slug = item["slug"].as_str().unwrap_or("");
+        let title_str = item["title"].as_str().unwrap_or("Unknown").to_string();
+
+        let type_tag = if content_type == "tv_series" {
+            "Series"
+        } else {
+            "Movie"
+        };
+
+        let total_eps = if content_type == "tv_series" {
+            let seasons = item["numberOfSeasons"].as_u64().unwrap_or(1);
+            Some(format!("{} Season", seasons))
+        } else {
+            item["quality"].as_str().map(|q| q.to_string())
+        };
+
+        movies.push(Movie {
+            id: format!("{}|{}", content_type, slug),
+            title: format!("[{}] {}", type_tag, title_str),
+            total_episodes: total_eps,
+        });
+    }
+
+    movies
+}
+
+fn parse_movie_json(json: &Value) -> (Vec<Episode>, Meta) {
+    let movie_obj = if json.get("movie").is_some() {
+        &json["movie"]
+    } else {
+        json
+    };
+
+    let movie_id = movie_obj["id"].as_str().unwrap_or("").to_string();
+    let poster_path = movie_obj["posterPath"].as_str().unwrap_or("");
+    let vote_avg = movie_obj["voteAverage"]
+        .as_str()
+        .or_else(|| movie_obj["voteAverage"].as_f64().map(|_| ""))
+        .unwrap_or("N/A");
+    let overview = movie_obj["overview"].as_str().unwrap_or("-");
+    let release = movie_obj["releaseDate"].as_str().unwrap_or("-");
+
+    let thumb_url = if !poster_path.is_empty() {
+        Some(format!("https://image.tmdb.org/t/p/w500{}", poster_path))
+    } else {
+        None
+    };
+
+    let meta = Meta {
+        thumb_url,
+        data: vec![
+            ("Tipe".to_string(), "Movie".to_string()),
+            ("Rilis".to_string(), release.to_string()),
+            ("Rating".to_string(), vote_avg.to_string()),
+            ("Sinopsis".to_string(), overview.to_string()),
+        ],
+    };
+
+    let episodes = vec![Episode {
+        id: format!("movie|{}", movie_id),
+        title: "Putar Film (Full Movie)".to_string(),
+        is_series: false,
+    }];
+
+    (episodes, meta)
+}
+
+fn parse_series_meta(json: &Value) -> (Meta, u64) {
+    let series_obj = if json.get("series").is_some() {
+        &json["series"]
+    } else {
+        json
+    };
+
+    let num_seasons = series_obj["numberOfSeasons"].as_u64().unwrap_or(1);
+    let poster_path = series_obj["posterPath"].as_str().unwrap_or("");
+    let overview = series_obj["overview"].as_str().unwrap_or("-");
+    let vote_avg = series_obj["voteAverage"].as_str().unwrap_or("N/A");
+    let status = series_obj["status"].as_str().unwrap_or("-");
+
+    let thumb_url = if !poster_path.is_empty() {
+        Some(format!("https://image.tmdb.org/t/p/w500{}", poster_path))
+    } else {
+        None
+    };
+
+    let meta = Meta {
+        thumb_url,
+        data: vec![
+            ("Tipe".to_string(), "TV Series".to_string()),
+            ("Status".to_string(), status.to_string()),
+            ("Rating".to_string(), vote_avg.to_string()),
+            ("Total Season".to_string(), num_seasons.to_string()),
+            ("Sinopsis".to_string(), overview.to_string()),
+        ],
+    };
+
+    (meta, num_seasons)
+}
+
+fn parse_season_json(json: &Value, season: u64) -> Vec<Episode> {
+    let Some(ep_list) = json["season"]["episodes"].as_array() else {
+        return vec![];
+    };
+
+    ep_list
+        .iter()
+        .map(|ep| {
+            let ep_id = ep["id"].as_str().unwrap_or("");
+            let ep_num = ep["episodeNumber"].as_u64().unwrap_or(0);
+            let ep_name = ep["name"].as_str().unwrap_or("");
+
+            Episode {
+                id: format!("episode|{}", ep_id),
+                title: format!("S{}E{:02} - {}", season, ep_num, ep_name),
+                is_series: true,
+            }
+        })
+        .collect()
+}
+
 #[async_trait]
 impl Ext for Idlix {
     async fn search(&mut self, title: String, _page: usize) -> anyhow::Result<(Vec<Movie>, u64)> {
@@ -152,36 +283,7 @@ impl Ext for Idlix {
         let json: Value = serde_json::from_str(&text)
             .map_err(|e| anyhow::anyhow!("Gagal parse respon pencarian Idlix: {} | mentah: {}", e, text.chars().take(200).collect::<String>()))?;
 
-        let mut movies = vec![];
-
-        if let Some(results) = json["results"].as_array() {
-            for item in results {
-                let content_type = item["contentType"].as_str().unwrap_or("movie");
-                let slug = item["slug"].as_str().unwrap_or("");
-                let title_str = item["title"].as_str().unwrap_or("Unknown").to_string();
-
-                let type_tag = if content_type == "tv_series" {
-                    "Series"
-                } else {
-                    "Movie"
-                };
-
-                let total_eps = if content_type == "tv_series" {
-                    let seasons = item["numberOfSeasons"].as_u64().unwrap_or(1);
-                    Some(format!("{} Season", seasons))
-                } else {
-                    item["quality"].as_str().map(|q| q.to_string())
-                };
-
-                movies.push(Movie {
-                    id: format!("{}|{}", content_type, slug),
-                    title: format!("[{}] {}", type_tag, title_str),
-                    total_episodes: total_eps,
-                });
-            }
-        }
-
-        Ok((movies, 1))
+        Ok((parse_search_json(&json), 1))
     }
 
     async fn get_episodes(&self, movie: Movie) -> anyhow::Result<(Vec<Episode>, Meta)> {
@@ -197,79 +299,13 @@ impl Ext for Idlix {
             let url = format!("{}/api/movies/{}", self.base_url, slug);
             let text = curl_get(&url)?;
             let json: Value = serde_json::from_str(&text)?;
-
-            let movie_obj = if json.get("movie").is_some() {
-                &json["movie"]
-            } else {
-                &json
-            };
-
-            let movie_id = movie_obj["id"].as_str().unwrap_or("").to_string();
-            let poster_path = movie_obj["posterPath"].as_str().unwrap_or("");
-            let vote_avg = movie_obj["voteAverage"]
-                .as_str()
-                .or_else(|| movie_obj["voteAverage"].as_f64().map(|_| ""))
-                .unwrap_or("N/A");
-            let overview = movie_obj["overview"].as_str().unwrap_or("-");
-            let release = movie_obj["releaseDate"].as_str().unwrap_or("-");
-
-            let thumb_url = if !poster_path.is_empty() {
-                Some(format!("https://image.tmdb.org/t/p/w500{}", poster_path))
-            } else {
-                None
-            };
-
-            let meta = Meta {
-                thumb_url,
-                data: vec![
-                    ("Tipe".to_string(), "Movie".to_string()),
-                    ("Rilis".to_string(), release.to_string()),
-                    ("Rating".to_string(), vote_avg.to_string()),
-                    ("Sinopsis".to_string(), overview.to_string()),
-                ],
-            };
-
-            let episodes = vec![Episode {
-                id: format!("movie|{}", movie_id),
-                title: "Putar Film (Full Movie)".to_string(),
-                is_series: false,
-            }];
-
-            Ok((episodes, meta))
+            Ok(parse_movie_json(&json))
         } else {
             // TV Series
             let url = format!("{}/api/series/{}", self.base_url, slug);
             let text = curl_get(&url)?;
             let json: Value = serde_json::from_str(&text)?;
-
-            let series_obj = if json.get("series").is_some() {
-                &json["series"]
-            } else {
-                &json
-            };
-
-            let num_seasons = series_obj["numberOfSeasons"].as_u64().unwrap_or(1);
-            let poster_path = series_obj["posterPath"].as_str().unwrap_or("");
-            let overview = series_obj["overview"].as_str().unwrap_or("-");
-            let vote_avg = series_obj["voteAverage"].as_str().unwrap_or("N/A");
-            let status = series_obj["status"].as_str().unwrap_or("-");
-
-            let thumb_url = if !poster_path.is_empty() {
-                Some(format!("https://image.tmdb.org/t/p/w500{}", poster_path))
-            } else {
-                None
-            };
-
-            let meta = Meta {
-                thumb_url,
-                data: vec![
-                    ("Tipe".to_string(), "TV Series".to_string()),
-                    ("Status".to_string(), status.to_string()),
-                    ("Rating".to_string(), vote_avg.to_string()),
-                    ("Total Season".to_string(), num_seasons.to_string()),
-                    ("Sinopsis".to_string(), overview.to_string()),
-                ],
-            };
+            let (meta, num_seasons) = parse_series_meta(&json);
 
             let mut tasks = Vec::new();
             for s in 1..=num_seasons {
@@ -277,20 +313,7 @@ impl Ext for Idlix {
                 tasks.push(tokio::task::spawn_blocking(move || {
                     let s_text = curl_get(&season_url).ok()?;
                     let s_json: Value = serde_json::from_str(&s_text).ok()?;
-                    let ep_list = s_json["season"]["episodes"].as_array()?.clone();
-                    let mut eps = Vec::new();
-                    for ep in ep_list {
-                        let ep_id = ep["id"].as_str().unwrap_or("");
-                        let ep_num = ep["episodeNumber"].as_u64().unwrap_or(0);
-                        let ep_name = ep["name"].as_str().unwrap_or("");
-
-                        eps.push(Episode {
-                            id: format!("episode|{}", ep_id),
-                            title: format!("S{}E{:02} - {}", s, ep_num, ep_name),
-                            is_series: true,
-                        });
-                    }
-                    Some((s, eps))
+                    Some((s, parse_season_json(&s_json, s)))
                 }));
             }
 
@@ -679,6 +702,72 @@ fn patch_playlist(raw: &str, base_url: &str, token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture(name: &str) -> Value {
+        serde_json::from_str(match name {
+            "search" => include_str!("fixtures/idlix_search.json"),
+            "movie" => include_str!("fixtures/idlix_movie.json"),
+            "series" => include_str!("fixtures/idlix_series.json"),
+            "season" => include_str!("fixtures/idlix_season.json"),
+            _ => panic!("unknown fixture"),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn fixture_search_parses_series_and_movies() {
+        let movies = parse_search_json(&fixture("search"));
+
+        assert_eq!(movies.len(), 2);
+        assert_eq!(movies[0].id, "tv_series|sousou-no-frieren");
+        assert_eq!(movies[0].title, "[Series] Sousou no Frieren");
+        assert_eq!(movies[0].total_episodes.as_deref(), Some("2 Season"));
+        assert_eq!(movies[1].id, "movie|suzume");
+        assert_eq!(movies[1].title, "[Movie] Suzume");
+        assert_eq!(movies[1].total_episodes.as_deref(), Some("1080p"));
+    }
+
+    #[test]
+    fn fixture_movie_parses_episode_and_metadata() {
+        let (episodes, meta) = parse_movie_json(&fixture("movie"));
+
+        assert_eq!(episodes.len(), 1);
+        assert_eq!(episodes[0].id, "movie|movie-123");
+        assert_eq!(episodes[0].title, "Putar Film (Full Movie)");
+        assert!(!episodes[0].is_series);
+        assert!(meta
+            .thumb_url
+            .as_deref()
+            .is_some_and(|url| url.ends_with("/suzume.jpg")));
+        assert!(meta
+            .data
+            .iter()
+            .any(|(key, value)| key == "Rilis" && value == "2023-11-11"));
+        assert!(meta
+            .data
+            .iter()
+            .any(|(key, value)| key == "Rating" && value == "8.5"));
+    }
+
+    #[test]
+    fn fixture_series_and_season_parse_metadata_and_episodes() {
+        let (meta, seasons) = parse_series_meta(&fixture("series"));
+        assert_eq!(seasons, 2);
+        assert!(meta
+            .data
+            .iter()
+            .any(|(key, value)| key == "Total Season" && value == "2"));
+        assert!(meta
+            .data
+            .iter()
+            .any(|(key, value)| key == "Status" && value == "Ended"));
+
+        let episodes = parse_season_json(&fixture("season"), 2);
+        assert_eq!(episodes.len(), 2);
+        assert_eq!(episodes[0].id, "episode|ep-1");
+        assert_eq!(episodes[0].title, "S2E01 - Start");
+        assert_eq!(episodes[1].title, "S2E02 - Next");
+    }
 
     #[test]
     #[ignore = "requires network access to Idlix"]

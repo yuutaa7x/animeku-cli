@@ -41,12 +41,20 @@ impl Otakudesu {
         }
     }
 
+    async fn send(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> reqwest::Result<reqwest::Response> {
+        crate::ext::wait_for_provider(crate::ext::PROVIDER_OTAKUDESU).await;
+        request.send().await
+    }
+
     async fn resolve_desustream(&self, url: &str) -> String {
         if !url.contains("desustream") {
             return clean_url(url);
         }
 
-        let Ok(resp) = self.client.get(url).send().await else {
+        let Ok(resp) = self.send(self.client.get(url)).await else {
             return clean_url(url);
         };
         let Ok(text) = resp.text().await else {
@@ -63,10 +71,11 @@ impl Otakudesu {
         // source so ffmpeg can download it.
         if embed.contains("blogger.com/video.g") {
             if let Ok(resp) = self
-                .client
-                .get(&embed)
-                .header("Referer", OTAKUDESU_REFERER)
-                .send()
+                .send(
+                    self.client
+                        .get(&embed)
+                        .header("Referer", OTAKUDESU_REFERER),
+                )
                 .await
             {
                 if let Ok(text) = resp.text().await {
@@ -173,6 +182,148 @@ fn extract_blogger_video_url(text: &str) -> Option<String> {
         .map(|found| clean_url(&unescape_js_string(found.as_str())))
 }
 
+fn parse_search_page(html_text: &str, page: usize) -> (Vec<Movie>, u64) {
+    let document = Html::parse_document(html_text);
+    let selector = Selector::parse("ul.chivsrc li").unwrap();
+    let a_selector = Selector::parse("h2 a").unwrap();
+
+    let mut movies = vec![];
+    for element in document.select(&selector) {
+        if let Some(a_el) = element.select(&a_selector).next() {
+            let text = crate::models::clean_movie_title(&a_el.inner_html());
+            let href = a_el.value().attr("href").unwrap_or("").to_string();
+            movies.push(Movie {
+                id: href,
+                title: text,
+                total_episodes: None,
+            });
+        }
+    }
+
+    // Only expose a next page when the search page actually links to one.
+    // If there is no pagination markup, this stays at the current page.
+    let mut total_pages = page as u64;
+    for pagination_selector in [".pagination a", ".pagenavi a", ".hpage a", "a.page-numbers"] {
+        if let Ok(selector) = Selector::parse(pagination_selector) {
+            for link in document.select(&selector) {
+                if let Some(href) = link.value().attr("href") {
+                    total_pages = total_pages.max(page_number_from_href(href));
+                }
+                if let Ok(number) = link.text().collect::<String>().trim().parse::<u64>() {
+                    total_pages = total_pages.max(number);
+                }
+            }
+        }
+    }
+
+    (movies, total_pages)
+}
+
+fn parse_episode_page(html_text: &str) -> (Vec<Episode>, Meta) {
+    let document = Html::parse_document(html_text);
+
+    let ep_list_selector = Selector::parse(".episodelist ul li").unwrap();
+    let a_selector = Selector::parse("span a").unwrap();
+    let mut episodes = vec![];
+
+    for element in document.select(&ep_list_selector) {
+        if let Some(a_el) = element.select(&a_selector).next() {
+            let raw_text = a_el.inner_html();
+            let href = a_el.value().attr("href").unwrap_or("").to_string();
+            if raw_text.to_lowercase().contains("batch")
+                || href.contains("/lengkap/")
+                || href.contains("/batch/")
+            {
+                continue;
+            }
+            episodes.push(Episode {
+                id: href,
+                title: crate::models::clean_episode_title(&raw_text),
+                is_series: true,
+            });
+        }
+    }
+    episodes.reverse();
+
+    // Meta (optional)
+    let mut meta = Meta {
+        thumb_url: None,
+        data: vec![],
+    };
+
+    if let Ok(img_sel) = Selector::parse("img.attachment-post-thumbnail") {
+        if let Some(img) = document.select(&img_sel).next() {
+            if let Some(src) = img.value().attr("src") {
+                meta.thumb_url = Some(src.to_string());
+            }
+        }
+    }
+
+    if let Ok(info_sel) = Selector::parse(".infozingle p") {
+        for p in document.select(&info_sel) {
+            let clean = p.text().collect::<Vec<_>>().join(" ");
+            if let Some((k, v)) = clean.split_once(':') {
+                meta.data.push((k.trim().to_string(), v.trim().to_string()));
+            } else {
+                meta.data.push(("".to_string(), clean));
+            }
+        }
+    }
+
+    if let Ok(sinop_sel) = Selector::parse(".sinopc p") {
+        let mut sinopsis_text = String::new();
+        for p in document.select(&sinop_sel) {
+            let clean = p.text().collect::<Vec<_>>().join(" ");
+            let lower = clean.to_lowercase();
+            if lower.contains("tonton juga")
+                || lower.contains("kelanjutannya")
+                || lower.contains("batch")
+            {
+                continue;
+            }
+            if !sinopsis_text.is_empty() {
+                sinopsis_text.push(' ');
+            }
+            sinopsis_text.push_str(&clean);
+        }
+        if sinopsis_text.chars().count() > 320 {
+            let mut truncated = sinopsis_text.chars().take(320).collect::<String>();
+            truncated.push_str("...");
+            meta.data.push(("Sinopsis".to_string(), truncated));
+        } else if !sinopsis_text.is_empty() {
+            meta.data.push(("Sinopsis".to_string(), sinopsis_text));
+        }
+    }
+
+    (episodes, meta)
+}
+
+fn parse_stream_page(html_text: &str) -> (Option<String>, Vec<(String, String)>) {
+    let document = Html::parse_document(html_text);
+    let mut default_url = None;
+
+    let iframe_sel = Selector::parse("#pembed iframe, .player-embed iframe").unwrap();
+    if let Some(iframe) = document.select(&iframe_sel).next() {
+        if let Some(src) = iframe.value().attr("src") {
+            let mut url = clean_url(src);
+            if url.starts_with("//") {
+                url = format!("https:{}", url);
+            }
+            default_url = Some(url);
+        }
+    }
+
+    let mut mirrors = Vec::new();
+    let mirror_sel = Selector::parse(".mirrorstream ul li a").unwrap();
+    for a_el in document.select(&mirror_sel) {
+        let text = a_el.inner_html().trim().to_string();
+        let data_content = a_el.value().attr("data-content").unwrap_or("").to_string();
+        mirrors.push((text, data_content));
+    }
+
+    (default_url, mirrors)
+}
+
 #[async_trait]
 impl Ext for Otakudesu {
     async fn search(&mut self, title: String, page: usize) -> anyhow::Result<(Vec<Movie>, u64)> {
@@ -191,146 +342,21 @@ impl Ext for Otakudesu {
                 urlencoding::encode(&title)
             )
         };
-        let html_text = self.client.get(&url).send().await?.text().await?;
-        let document = Html::parse_document(&html_text);
-        let selector = Selector::parse("ul.chivsrc li").unwrap();
-        let a_selector = Selector::parse("h2 a").unwrap();
-
-        let mut movies = vec![];
-        for element in document.select(&selector) {
-            if let Some(a_el) = element.select(&a_selector).next() {
-                let text = crate::models::clean_movie_title(&a_el.inner_html());
-                let href = a_el.value().attr("href").unwrap_or("").to_string();
-                movies.push(Movie {
-                    id: href,
-                    title: text,
-                    total_episodes: None,
-                });
-            }
-        }
-
-        // Only expose a next page when the search page actually links to one.
-        // If there is no pagination markup, this stays at the current page.
-        let mut total_pages = page as u64;
-        for pagination_selector in [".pagination a", ".pagenavi a", ".hpage a", "a.page-numbers"] {
-            if let Ok(selector) = Selector::parse(pagination_selector) {
-                for link in document.select(&selector) {
-                    if let Some(href) = link.value().attr("href") {
-                        total_pages = total_pages.max(page_number_from_href(href));
-                    }
-                    if let Ok(number) = link.text().collect::<String>().trim().parse::<u64>() {
-                        total_pages = total_pages.max(number);
-                    }
-                }
-            }
-        }
-
-        Ok((movies, total_pages))
+        let html_text = self.send(self.client.get(&url)).await?.text().await?;
+        Ok(parse_search_page(&html_text, page))
     }
 
     async fn get_episodes(&self, movie: Movie) -> anyhow::Result<(Vec<Episode>, Meta)> {
-        let html_text = self.client.get(&movie.id).send().await?.text().await?;
-        let document = Html::parse_document(&html_text);
-        
-        let ep_list_selector = Selector::parse(".episodelist ul li").unwrap();
-        let a_selector = Selector::parse("span a").unwrap();
-        let mut episodes = vec![];
-        
-
-        for element in document.select(&ep_list_selector) {
-            if let Some(a_el) = element.select(&a_selector).next() {
-                let raw_text = a_el.inner_html();
-                let href = a_el.value().attr("href").unwrap_or("").to_string();
-                if raw_text.to_lowercase().contains("batch") || href.contains("/lengkap/") || href.contains("/batch/") {
-                    continue;
-                }
-                episodes.push(Episode {
-                    id: href,
-                    title: crate::models::clean_episode_title(&raw_text),
-                    is_series: true,
-                });
-            }
-        }
-        episodes.reverse();
-        
-        // Meta (optional)
-        let mut meta = Meta {
-            thumb_url: None,
-            data: vec![],
-        };
-
-        if let Ok(img_sel) = Selector::parse("img.attachment-post-thumbnail") {
-            if let Some(img) = document.select(&img_sel).next() {
-                if let Some(src) = img.value().attr("src") {
-                    meta.thumb_url = Some(src.to_string());
-                }
-            }
-        }
-        
-        if let Ok(info_sel) = Selector::parse(".infozingle p") {
-            for p in document.select(&info_sel) {
-                let clean = p.text().collect::<Vec<_>>().join(" ");
-                if let Some((k, v)) = clean.split_once(':') {
-                    meta.data.push((k.trim().to_string(), v.trim().to_string()));
-                } else {
-                    meta.data.push(("".to_string(), clean));
-                }
-            }
-        }
-
-        if let Ok(sinop_sel) = Selector::parse(".sinopc p") {
-            let mut sinopsis_text = String::new();
-            for p in document.select(&sinop_sel) {
-                let clean = p.text().collect::<Vec<_>>().join(" ");
-                let lower = clean.to_lowercase();
-                if lower.contains("tonton juga") || lower.contains("kelanjutannya") || lower.contains("batch") {
-                    continue;
-                }
-                if !sinopsis_text.is_empty() {
-                    sinopsis_text.push(' ');
-                }
-                sinopsis_text.push_str(&clean);
-            }
-            if sinopsis_text.chars().count() > 320 {
-                let mut truncated = sinopsis_text.chars().take(320).collect::<String>();
-                truncated.push_str("...");
-                meta.data.push(("Sinopsis".to_string(), truncated));
-            } else if !sinopsis_text.is_empty() {
-                meta.data.push(("Sinopsis".to_string(), sinopsis_text));
-            }
-        }
-
-        Ok((episodes, meta))
+        let html_text = self.send(self.client.get(&movie.id)).await?.text().await?;
+        Ok(parse_episode_page(&html_text))
     }
 
     async fn get_stream_urls(&self, episode: Episode) -> anyhow::Result<Vec<Stream>> {
         let ep_url = episode.id.clone();
-        let html_text = self.client.get(&ep_url).send().await?.text().await?;
+        let html_text = self.send(self.client.get(&ep_url)).await?.text().await?;
         
         let mut streams = vec![];
-        let mut mirrors = vec![];
-        let mut default_url = None;
-
-        {
-            let document = Html::parse_document(&html_text);
-            let iframe_sel = Selector::parse("#pembed iframe, .player-embed iframe").unwrap();
-            if let Some(iframe) = document.select(&iframe_sel).next() {
-                if let Some(src) = iframe.value().attr("src") {
-                    let mut url = clean_url(src);
-                    if url.starts_with("//") {
-                        url = format!("https:{}", url);
-                    }
-                    default_url = Some(url);
-                }
-            }
-
-            let mirror_sel = Selector::parse(".mirrorstream ul li a").unwrap();
-            for a_el in document.select(&mirror_sel) {
-                let text = a_el.inner_html().trim().to_string();
-                let data_content = a_el.value().attr("data-content").unwrap_or("").to_string();
-                mirrors.push((text, data_content));
-            }
-        }
+        let (default_url, mirrors) = parse_stream_page(&html_text);
 
         if let Some(mut url) = default_url {
             url = self.resolve_desustream(&url).await;
@@ -342,10 +368,14 @@ impl Ext for Otakudesu {
 
         let params = [("action", "aa1208d27f29ca340c92c66d1926f13f")];
         let ajax_url = format!("{}/wp-admin/admin-ajax.php", self.base_url);
-        let res = self.client.post(&ajax_url)
-            .header("Referer", &ep_url)
-            .form(&params)
-            .send().await?;
+        let res = self
+            .send(
+                self.client
+                    .post(&ajax_url)
+                    .header("Referer", &ep_url)
+                    .form(&params),
+            )
+            .await?;
             
         let json_val: Value = res.json().await.unwrap_or(Value::Null);
         let nonce = if let Some(n) = json_val.get("data").and_then(|v| v.as_str()) {
@@ -375,7 +405,15 @@ impl Ext for Otakudesu {
                 form.insert(k, v);
             }
             
-            if let Ok(m_resp) = self.client.post(&ajax_url).header("Referer", &ep_url).form(&form).send().await {
+            if let Ok(m_resp) = self
+                .send(
+                    self.client
+                        .post(&ajax_url)
+                        .header("Referer", &ep_url)
+                        .form(&form),
+                )
+                .await
+            {
                 if let Ok(m_json) = m_resp.json::<Value>().await {
                     if let Some(data) = m_json.get("data").and_then(|v| v.as_str()) {
                         if let Ok(html_bytes) = base64::prelude::BASE64_STANDARD.decode(data) {
@@ -407,6 +445,63 @@ impl Ext for Otakudesu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixture_search_parses_movies_and_pagination() {
+        let (movies, total_pages) =
+            parse_search_page(include_str!("fixtures/otakudesu_search.html"), 1);
+
+        assert_eq!(movies.len(), 2);
+        assert_eq!(movies[0].title, "Sousou no Frieren");
+        assert_eq!(
+            movies[0].id,
+            "https://otakudesu.blog/anime/sousou-no-frieren-sub-indo/"
+        );
+        assert_eq!(movies[1].title, "Frieren: Beyond Journey's End");
+        assert_eq!(total_pages, 3);
+    }
+
+    #[test]
+    fn fixture_episode_page_parses_episodes_and_metadata() {
+        let (episodes, meta) = parse_episode_page(include_str!("fixtures/otakudesu_episode.html"));
+
+        assert_eq!(episodes.len(), 2);
+        assert_eq!(episodes[0].title, "Episode 11");
+        assert_eq!(episodes[1].title, "Episode 12");
+        assert!(meta
+            .thumb_url
+            .as_deref()
+            .is_some_and(|url| url.ends_with("frieren.jpg")));
+        assert!(meta
+            .data
+            .iter()
+            .any(|(key, value)| key == "Judul" && value == "Sousou no Frieren"));
+        assert!(meta
+            .data
+            .iter()
+            .any(|(key, value)| key == "Status" && value == "Ongoing"));
+        assert!(meta
+            .data
+            .iter()
+            .any(|(key, value)| key == "Sinopsis" && value.contains("penyihir elf")));
+        assert!(!meta
+            .data
+            .iter()
+            .any(|(_, value)| value.contains("Tonton juga")));
+    }
+
+    #[test]
+    fn fixture_stream_page_parses_default_and_mirrors() {
+        let (default_url, mirrors) = parse_stream_page(include_str!("fixtures/otakudesu_stream.html"));
+
+        assert_eq!(
+            default_url.as_deref(),
+            Some("https://desustream.net/embed/frieren-12")
+        );
+        assert_eq!(mirrors.len(), 1);
+        assert_eq!(mirrors[0].0, "Mirror 1");
+        assert_eq!(mirrors[0].1, "eyJpZCI6Im1pcnJvci0xIn0=");
+    }
 
     #[test]
     fn test_extract_between() {

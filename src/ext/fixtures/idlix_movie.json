@@ -1,0 +1,9 @@
+{
+  "movie": {
+    "id": "movie-123",
+    "posterPath": "/suzume.jpg",
+    "voteAverage": "8.5",
+    "overview": "Seorang gadis bertemu pintu misterius.",
+    "releaseDate": "2023-11-11"
+  }
+}

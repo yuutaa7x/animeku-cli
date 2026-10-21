@@ -180,8 +180,27 @@ fn verify_checksum(bytes: &[u8], checksum_text: &str) -> Result<()> {
     Ok(())
 }
 
+fn binary_runs(path: &Path) -> Result<()> {
+    let status = std::process::Command::new(path)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .with_context(|| format!("gagal menjalankan binary baru '{}'", path.display()))?;
+    if !status.success() {
+        anyhow::bail!("binary baru keluar dengan status {status}");
+    }
+    Ok(())
+}
+
 fn install_binary(bytes: &[u8]) -> Result<PathBuf> {
     let current = std::env::current_exe().context("tidak bisa menemukan path executable")?;
+    replace_binary(&current, bytes)?;
+    Ok(current)
+}
+
+fn replace_binary(current: &Path, bytes: &[u8]) -> Result<()> {
     let parent = current
         .parent()
         .context("executable tidak punya parent directory")?;
@@ -190,6 +209,7 @@ fn install_binary(bytes: &[u8]) -> Result<PathBuf> {
         std::process::id(),
         if cfg!(windows) { ".exe" } else { "" }
     ));
+    let backup = current.with_extension(if cfg!(windows) { "exe.old" } else { "old" });
 
     fs::write(&temp, bytes)
         .with_context(|| format!("gagal menulis binary baru ke '{}'", temp.display()))?;
@@ -199,16 +219,22 @@ fn install_binary(bytes: &[u8]) -> Result<PathBuf> {
         let _ = fs::set_permissions(&temp, fs::Permissions::from_mode(0o755));
     }
 
+    // Check compatibility before touching the working installation. This
+    // catches glibc/architecture mismatches while the old binary is intact.
+    if let Err(error) = binary_runs(&temp) {
+        let _ = fs::remove_file(&temp);
+        return Err(error).context("binary rilis tidak bisa dijalankan di sistem ini");
+    }
+
     #[cfg(windows)]
     {
-        let old = current.with_extension("exe.old");
-        let _ = fs::remove_file(&old);
-        if let Err(error) = fs::rename(&current, &old) {
+        let _ = fs::remove_file(&backup);
+        if let Err(error) = fs::rename(current, &backup) {
             let _ = fs::remove_file(&temp);
             return Err(error).with_context(|| format!("gagal mengganti '{}'", current.display()));
         }
-        if let Err(error) = fs::rename(&temp, &current) {
-            let _ = fs::rename(&old, &current);
+        if let Err(error) = fs::rename(&temp, current) {
+            let _ = fs::rename(&backup, current);
             let _ = fs::remove_file(&temp);
             return Err(error)
                 .with_context(|| format!("gagal memasang binary baru ke '{}'", current.display()));
@@ -217,16 +243,53 @@ fn install_binary(bytes: &[u8]) -> Result<PathBuf> {
 
     #[cfg(not(windows))]
     {
-        fs::rename(&temp, &current).with_context(|| {
-            format!(
-                "gagal memasang binary baru ke '{}'. Coba jalankan dengan permission yang cukup.",
-                current.display()
-            )
-        })?;
+        if let Err(error) = fs::copy(current, &backup) {
+            let _ = fs::remove_file(&temp);
+            return Err(error).with_context(|| {
+                format!(
+                    "gagal membuat backup '{}' sebelum memperbarui",
+                    backup.display()
+                )
+            });
+        }
+        if let Err(error) = fs::rename(&temp, current) {
+            let _ = fs::remove_file(&backup);
+            let _ = fs::remove_file(&temp);
+            return Err(error).with_context(|| {
+                format!(
+                    "gagal memasang binary baru ke '{}'. Coba jalankan dengan permission yang cukup.",
+                    current.display()
+                )
+            });
+        }
     }
 
-    update_alias(&current, bytes);
-    Ok(current)
+    // Verify the installed path as well: permissions or a broken dynamic
+    // linker can differ from the temporary file. Roll back on failure.
+    if let Err(error) = binary_runs(current) {
+        #[cfg(windows)]
+        {
+            let _ = fs::remove_file(current);
+        }
+        let restored = fs::rename(&backup, current);
+        let detail = if restored.is_ok() {
+            "binary lama sudah dipulihkan".to_string()
+        } else {
+            format!(
+                "rollback gagal; binary lama tersedia di '{}'",
+                backup.display()
+            )
+        };
+        return Err(error).context(format!("binary baru gagal dijalankan; {detail}"));
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = fs::remove_file(&backup);
+    }
+
+    update_alias(current, bytes);
+    Ok(())
 }
 
 fn update_alias(current: &Path, bytes: &[u8]) {
@@ -295,5 +358,70 @@ mod tests {
         let good = hex::encode(Sha256::digest(bytes));
         assert!(verify_checksum(bytes, &format!("{good}  animeku-cli")).is_ok());
         assert!(verify_checksum(bytes, "deadbeef  animeku-cli").is_err());
+    }
+
+    #[cfg(unix)]
+    fn test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "animeku-update-test-{}-{name}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    fn write_script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replace_binary_keeps_old_binary_when_new_one_cannot_run() {
+        let dir = test_dir("precheck");
+        let current = dir.join("animeku-cli");
+        write_script(&current, "exit 0");
+        let original = fs::read(&current).unwrap();
+
+        assert!(replace_binary(&current, b"not a runnable binary").is_err());
+        assert_eq!(fs::read(&current).unwrap(), original);
+        assert!(!current.with_extension("old").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replace_binary_rolls_back_when_installed_binary_fails() {
+        let dir = test_dir("rollback");
+        let current = dir.join("animeku-cli");
+        write_script(&current, "exit 0");
+        let original = fs::read(&current).unwrap();
+
+        let broken_after_install =
+            b"#!/bin/sh\ncase \"$0\" in */.animeku-cli-update-*) exit 0 ;; *) exit 1 ;; esac\n";
+        let error = replace_binary(&current, broken_after_install).unwrap_err();
+
+        assert!(format!("{error:#}").contains("dipulihkan"));
+        assert_eq!(fs::read(&current).unwrap(), original);
+        assert!(!current.with_extension("old").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replace_binary_installs_working_binary() {
+        let dir = test_dir("success");
+        let current = dir.join("animeku-cli");
+        write_script(&current, "exit 0");
+
+        let replacement = b"#!/bin/sh\nexit 0\n";
+        replace_binary(&current, replacement).unwrap();
+
+        assert_eq!(fs::read(&current).unwrap(), replacement);
+        assert!(!current.with_extension("old").exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

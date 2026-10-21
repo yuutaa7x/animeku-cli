@@ -1,0 +1,16 @@
+{
+  "season": {
+    "episodes": [
+      {
+        "id": "ep-1",
+        "episodeNumber": 1,
+        "name": "Start"
+      },
+      {
+        "id": "ep-2",
+        "episodeNumber": 2,
+        "name": "Next"
+      }
+    ]
+  }
+}
