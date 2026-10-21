@@ -97,8 +97,19 @@ cargo uninstall animeku-cli
 - Dukungan CLI flags untuk pencarian langsung, resume, pemilihan provider/player, dan menonaktifkan RPC.
 - Pengecekan dependensi dan Check Health sistem yang interaktif.
 - Retry otomatis dan fallback Idlix ↔ Otakudesu saat provider error atau tidak mengembalikan hasil.
+- Cache metadata persisten untuk hasil pencarian dan daftar episode, sehingga pencarian ulang lebih cepat tanpa mengambil stream lama.
 
 ### Changelog
+
+#### v0.3.3 — Cache metadata persisten (21 Oktober 2026)
+
+- Hasil pencarian dan daftar episode sekarang disimpan di cache disk dan dipakai lagi antar-sesi.
+- Cache pencarian berlaku 6 jam dan cache daftar episode 12 jam. Setelah kedaluwarsa, data diambil ulang dari provider.
+- Stream URL tetap tidak pernah disimpan; setiap playback selalu mengambil URL baru agar tidak kena token/stream kedaluwarsa.
+- Cache ikut dipakai saat fallback Idlix ↔ Otakudesu, termasuk untuk mencari judul dan episode yang cocok di provider satunya.
+- Entri lama dibersihkan otomatis dan jumlah entri dibatasi agar file cache tidak terus membengkak.
+- Menu Pengaturan → hapus cache metadata & provider sekarang juga menghapus cache metadata persisten.
+- Lokasi cache: `dirs::cache_dir()/animeku-cli/metadata-cache.json` (Linux biasanya `~/.cache/animeku-cli/metadata-cache.json`).
 
 #### v0.3.2 — Reliability: retry, timeout & fallback provider (21 Oktober 2026)
 
@@ -139,7 +150,7 @@ Rilis ini fokus pada kenyamanan navigasi, riwayat, dan kontrol dari terminal.
 - Aksi "Pilih Episode Lain" langsung dari detail riwayat.
 - Provider pilihan per judul diingat, begitu juga hasil deteksi AniList, sehingga pencarian berulang tidak melakukan deteksi dari awal.
 - Override provider lewat config, CLI, atau aksi "Ganti Provider & Cari".
-- Menu Pengaturan untuk player default, auto-next, provider, Discord RPC, banner compact, poster episode, hapus riwayat, dan hapus cache provider.
+- Menu Pengaturan untuk player default, auto-next, provider, Discord RPC, banner compact, poster episode, hapus riwayat, dan hapus cache metadata/provider.
 - Config disimpan sebagai JSON di `dirs::config_dir()/animeku-cli/config.json` (Linux biasanya `~/.config/animeku-cli/config.json`).
 
 ##### Tampilan & Error Handling

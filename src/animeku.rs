@@ -14,6 +14,7 @@ pub struct AnimekuCli {
     movie_cache: HashMap<String, (Vec<Movie>, u64)>,
     episode_cache: HashMap<String, (Vec<Episode>, Meta)>,
     stream_cache: HashMap<String, Vec<Stream>>,
+    metadata_cache: Option<crate::cache::MetadataCache>,
     extractor: Box<dyn Ext>,
     provider_type: usize,
     fallback_enabled: bool,
@@ -450,6 +451,52 @@ fn select_episode_globally(
 }
 
 impl AnimekuCli {
+    fn cached_search(
+        &self,
+        provider: usize,
+        title: &str,
+        page: usize,
+    ) -> Option<(Vec<Movie>, u64)> {
+        self.metadata_cache
+            .as_ref()?
+            .get_search(provider, title, page)
+    }
+
+    fn remember_search(
+        &mut self,
+        provider: usize,
+        title: &str,
+        page: usize,
+        movies: Vec<Movie>,
+        total_pages: u64,
+    ) {
+        if let Some(cache) = self.metadata_cache.as_mut() {
+            cache.put_search(provider, title, page, movies, total_pages);
+        }
+    }
+
+    fn cached_episodes(
+        &self,
+        provider: usize,
+        movie_id: &str,
+    ) -> Option<(Vec<Episode>, Meta)> {
+        self.metadata_cache
+            .as_ref()?
+            .get_episodes(provider, movie_id)
+    }
+
+    fn remember_episodes(
+        &mut self,
+        provider: usize,
+        movie_id: &str,
+        episodes: Vec<Episode>,
+        meta: Meta,
+    ) {
+        if let Some(cache) = self.metadata_cache.as_mut() {
+            cache.put_episodes(provider, movie_id, episodes, meta);
+        }
+    }
+
     pub fn get_meta(&self, id: &str) -> Option<crate::models::Meta> {
         self.episode_cache.get(id).map(|(_, m)| m.clone())
     }
@@ -460,15 +507,28 @@ impl AnimekuCli {
         self.current_movie = Some(movie.clone());
         self.current_episode = None;
         if !self.episode_cache.contains_key(&movie.id) {
-            let message = format!("Memuat metadata '{}'...", movie.title.trim());
-            let episodes_and_meta = crate::util::with_spinner(
-                message,
-                retry_episodes(self.extractor.as_ref(), movie),
-            )
-            .await
-            .ok()?;
-            self.episode_cache
-                .insert(movie.id.clone(), episodes_and_meta);
+            let provider = self.provider_type;
+            if let Some(cached) = self.cached_episodes(provider, &movie.id) {
+                self.episode_cache.insert(movie.id.clone(), cached);
+            } else {
+                let message = format!("Memuat metadata '{}'...", movie.title.trim());
+                let episodes_and_meta = crate::util::with_spinner(
+                    message,
+                    retry_episodes(self.extractor.as_ref(), movie),
+                )
+                .await
+                .ok()?;
+                if !episodes_and_meta.0.is_empty() {
+                    self.remember_episodes(
+                        provider,
+                        &movie.id,
+                        episodes_and_meta.0.clone(),
+                        episodes_and_meta.1.clone(),
+                    );
+                }
+                self.episode_cache
+                    .insert(movie.id.clone(), episodes_and_meta);
+            }
         }
         self.get_meta(&movie.id)
     }
@@ -505,6 +565,9 @@ impl AnimekuCli {
             movie_cache: HashMap::new(),
             episode_cache: HashMap::new(),
             stream_cache: HashMap::new(),
+            // Tests use the fallback-disabled constructor and must not read or
+            // write the real user cache.
+            metadata_cache: fallback_enabled.then(crate::cache::MetadataCache::load),
             extractor,
             provider_type,
             fallback_enabled,
@@ -548,6 +611,12 @@ impl AnimekuCli {
         let from = self.provider_type;
         let to = alternate_provider(from);
         notify_fallback(from, to, reason);
+
+        if let Some((movies, total_pages)) = self.cached_search(to, title, 1) {
+            self.switch_provider(to);
+            notify_fallback_success(to);
+            return Some((movies, total_pages));
+        }
 
         let mut extractor = ext::make_extractor(to);
         match retry_search(extractor.as_mut(), title, 1).await {
@@ -594,24 +663,37 @@ impl AnimekuCli {
         }
 
         let mut extractor = ext::make_extractor(to);
-        let candidates = match retry_search(extractor.as_mut(), &title, 1).await {
-            Ok((movies, _)) if !movies.is_empty() => movies,
-            Ok(_) => {
-                eprintln!(
-                    "{} {} juga tidak menemukan judul yang cocok.",
-                    "■".red(),
-                    ext::provider_name(to)
-                );
-                return None;
-            }
-            Err(error) => {
-                eprintln!(
-                    "{} {} juga gagal mencari judul: {:#}",
-                    "■".red(),
-                    ext::provider_name(to),
-                    error
-                );
-                return None;
+        let candidates = if let Some((movies, _)) = self.cached_search(to, &title, 1) {
+            movies
+        } else {
+            match retry_search(extractor.as_mut(), &title, 1).await {
+                Ok((movies, total_pages)) if !movies.is_empty() => {
+                    self.remember_search(
+                        to,
+                        &title,
+                        1,
+                        movies.clone(),
+                        total_pages,
+                    );
+                    movies
+                }
+                Ok(_) => {
+                    eprintln!(
+                        "{} {} juga tidak menemukan judul yang cocok.",
+                        "■".red(),
+                        ext::provider_name(to)
+                    );
+                    return None;
+                }
+                Err(error) => {
+                    eprintln!(
+                        "{} {} juga gagal mencari judul: {:#}",
+                        "■".red(),
+                        ext::provider_name(to),
+                        error
+                    );
+                    return None;
+                }
             }
         };
 
@@ -626,24 +708,36 @@ impl AnimekuCli {
         };
 
         let (episodes, meta) =
-            match retry_episodes(extractor.as_ref(), &fallback_movie).await {
-                Ok(item) if !item.0.is_empty() => item,
-                Ok(_) => {
-                    eprintln!(
-                        "{} {} juga tidak memiliki daftar episode.",
-                        "■".red(),
-                        ext::provider_name(to)
-                    );
-                    return None;
-                }
-                Err(error) => {
-                    eprintln!(
-                        "{} {} juga gagal memuat episode: {:#}",
-                        "■".red(),
-                        ext::provider_name(to),
-                        error
-                    );
-                    return None;
+            if let Some(cached) = self.cached_episodes(to, &fallback_movie.id) {
+                cached
+            } else {
+                match retry_episodes(extractor.as_ref(), &fallback_movie).await {
+                    Ok(item) if !item.0.is_empty() => {
+                        self.remember_episodes(
+                            to,
+                            &fallback_movie.id,
+                            item.0.clone(),
+                            item.1.clone(),
+                        );
+                        item
+                    }
+                    Ok(_) => {
+                        eprintln!(
+                            "{} {} juga tidak memiliki daftar episode.",
+                            "■".red(),
+                            ext::provider_name(to)
+                        );
+                        return None;
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "{} {} juga gagal memuat episode: {:#}",
+                            "■".red(),
+                            ext::provider_name(to),
+                            error
+                        );
+                        return None;
+                    }
                 }
             };
 
@@ -674,24 +768,37 @@ impl AnimekuCli {
         }
 
         let mut extractor = ext::make_extractor(to);
-        let candidates = match retry_search(extractor.as_mut(), &title, 1).await {
-            Ok((movies, _)) if !movies.is_empty() => movies,
-            Ok(_) => {
-                eprintln!(
-                    "{} {} juga tidak menemukan judul yang cocok.",
-                    "■".red(),
-                    ext::provider_name(to)
-                );
-                return None;
-            }
-            Err(error) => {
-                eprintln!(
-                    "{} {} juga gagal mencari judul: {:#}",
-                    "■".red(),
-                    ext::provider_name(to),
-                    error
-                );
-                return None;
+        let candidates = if let Some((movies, _)) = self.cached_search(to, &title, 1) {
+            movies
+        } else {
+            match retry_search(extractor.as_mut(), &title, 1).await {
+                Ok((movies, total_pages)) if !movies.is_empty() => {
+                    self.remember_search(
+                        to,
+                        &title,
+                        1,
+                        movies.clone(),
+                        total_pages,
+                    );
+                    movies
+                }
+                Ok(_) => {
+                    eprintln!(
+                        "{} {} juga tidak menemukan judul yang cocok.",
+                        "■".red(),
+                        ext::provider_name(to)
+                    );
+                    return None;
+                }
+                Err(error) => {
+                    eprintln!(
+                        "{} {} juga gagal mencari judul: {:#}",
+                        "■".red(),
+                        ext::provider_name(to),
+                        error
+                    );
+                    return None;
+                }
             }
         };
 
@@ -706,24 +813,36 @@ impl AnimekuCli {
         };
 
         let (episodes, meta) =
-            match retry_episodes(extractor.as_ref(), &fallback_movie).await {
-                Ok(item) if !item.0.is_empty() => item,
-                Ok(_) => {
-                    eprintln!(
-                        "{} {} juga tidak memiliki daftar episode.",
-                        "■".red(),
-                        ext::provider_name(to)
-                    );
-                    return None;
-                }
-                Err(error) => {
-                    eprintln!(
-                        "{} {} juga gagal memuat episode: {:#}",
-                        "■".red(),
-                        ext::provider_name(to),
-                        error
-                    );
-                    return None;
+            if let Some(cached) = self.cached_episodes(to, &fallback_movie.id) {
+                cached
+            } else {
+                match retry_episodes(extractor.as_ref(), &fallback_movie).await {
+                    Ok(item) if !item.0.is_empty() => {
+                        self.remember_episodes(
+                            to,
+                            &fallback_movie.id,
+                            item.0.clone(),
+                            item.1.clone(),
+                        );
+                        item
+                    }
+                    Ok(_) => {
+                        eprintln!(
+                            "{} {} juga tidak memiliki daftar episode.",
+                            "■".red(),
+                            ext::provider_name(to)
+                        );
+                        return None;
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "{} {} juga gagal memuat episode: {:#}",
+                            "■".red(),
+                            ext::provider_name(to),
+                            error
+                        );
+                        return None;
+                    }
                 }
             };
 
@@ -775,8 +894,26 @@ impl AnimekuCli {
         let mut is_latest = false;
 
         loop {
+            let page_key = page.to_string();
+            if !self.movie_cache.contains_key(&page_key) {
+                if let Some((movies, total_pages)) =
+                    self.cached_search(self.provider_type, search_title, page)
+                {
+                    if page == 1 && !movies.is_empty() {
+                        println!(
+                            "{} Ditemukan {} judul di {} (cache)",
+                            "✓".green(),
+                            movies.len().to_string().green(),
+                            ext::provider_name(self.provider_type).cyan()
+                        );
+                    }
+                    self.movie_cache
+                        .insert(page_key.clone(), (movies, total_pages));
+                }
+            }
+
             if let std::collections::hash_map::Entry::Vacant(_) =
-                self.movie_cache.entry(page.to_string())
+                self.movie_cache.entry(page_key.clone())
             {
                 let spinner_message = format!("Mencari '{}'...", search_title);
                 let result = crate::util::with_spinner(
@@ -847,8 +984,18 @@ impl AnimekuCli {
                         ext::provider_name(self.provider_type).cyan()
                     );
                 }
+                if !movie_list.is_empty() {
+                    let provider = self.provider_type;
+                    self.remember_search(
+                        provider,
+                        search_title,
+                        page,
+                        movie_list.clone(),
+                        total_pages,
+                    );
+                }
                 self.movie_cache
-                    .insert(page.to_string(), (movie_list, total_pages.max(1)));
+                    .insert(page_key, (movie_list, total_pages.max(1)));
             }
 
             let (page_movies, total_pages) =
@@ -945,9 +1092,16 @@ impl AnimekuCli {
         self.current_episode = None;
         let id = movie.id.clone();
         let spinner_message = format!("Memuat daftar episode '{}'...", movie.title.trim());
+        let provider = self.provider_type;
+        let mut from_cache = false;
 
         let (episodes, meta) = if let Some(cached) = self.episode_cache.get(&id) {
+            from_cache = true;
             cached.clone()
+        } else if let Some(cached) = self.cached_episodes(provider, &id) {
+            from_cache = true;
+            self.episode_cache.insert(id.clone(), cached.clone());
+            cached
         } else {
             let result = crate::util::with_spinner(
                 spinner_message,
@@ -957,6 +1111,12 @@ impl AnimekuCli {
 
             match result {
                 Ok(item) if !item.0.is_empty() => {
+                    self.remember_episodes(
+                        provider,
+                        &id,
+                        item.0.clone(),
+                        item.1.clone(),
+                    );
                     self.episode_cache.insert(id.clone(), item.clone());
                     item
                 }
@@ -1008,9 +1168,10 @@ impl AnimekuCli {
         }
 
         println!(
-            "{} Daftar episode dimuat dari {}",
+            "{} Daftar episode dimuat dari {}{}",
             "✓".green(),
-            ext::provider_name(self.provider_type).cyan()
+            ext::provider_name(self.provider_type).cyan(),
+            if from_cache { " (cache)" } else { "" }
         );
         println!(
             "\n  {}{}\n",

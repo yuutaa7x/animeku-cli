@@ -10,6 +10,7 @@ use tokio::runtime;
 use crate::{input::{get_user_input, load_history, save_history, pick_provider, load_watch_history, delete_watch_entry, delete_search_history_entry}, util::clearscreen_and_show_banner};
 
 mod animeku;
+mod cache;
 mod config;
 mod episode;
 mod ext;
@@ -1416,7 +1417,7 @@ async fn handle_settings_menu(discord: &mut Option<DiscordIpcClient>) -> anyhow:
             ),
             "Hapus riwayat pencarian".to_string(),
             "Hapus riwayat tontonan".to_string(),
-            "Hapus cache provider".to_string(),
+            "Hapus cache metadata & provider".to_string(),
             "Perbarui Animeku-CLI".to_string(),
             "Kembali".to_string(),
         ];
@@ -1468,7 +1469,8 @@ async fn handle_settings_menu(discord: &mut Option<DiscordIpcClient>) -> anyhow:
                 }
             }
             8 => {
-                if confirm_action("Hapus cache deteksi dan pilihan provider?")? {
+                if confirm_action("Hapus cache metadata, deteksi, dan pilihan provider?")? {
+                    crate::cache::clear();
                     input::clear_provider_detections();
                     input::clear_search_providers();
                 }

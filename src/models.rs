@@ -170,7 +170,8 @@ impl std::fmt::Display for Stream {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Meta {
     pub thumb_url: Option<String>,
     pub data: Vec<(String, String)>,
