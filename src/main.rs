@@ -2238,14 +2238,18 @@ fn episodes_after_last(
         return episodes.to_vec();
     };
 
-    let first_number = episodes
+    let episode_key = |title: &str| {
+        crate::episode::parse_season_episode(title)
+            .or_else(|| crate::episode::episode_number(title).map(|number| (1, number)))
+    };
+    let first_key = episodes
         .first()
-        .and_then(|episode| crate::episode::episode_number(&episode.title));
-    let last_number = episodes
+        .and_then(|episode| episode_key(&episode.title));
+    let last_key = episodes
         .last()
-        .and_then(|episode| crate::episode::episode_number(&episode.title));
+        .and_then(|episode| episode_key(&episode.title));
     let newest_first = matches!(
-        (first_number, last_number),
+        (first_key, last_key),
         (Some(first), Some(last)) if first > last
     );
 
@@ -2743,6 +2747,23 @@ mod main_tests {
             ..Default::default()
         };
         assert!(episodes_after_last(&newest_first, Some(&last_newest)).is_empty());
+
+        let last_season_one = crate::models::WatchEntry {
+            episode: episode("s1e12", "S1E12 - Finale"),
+            ..Default::default()
+        };
+        let cross_season = vec![
+            episode("s2e02", "S2E02 - Next"),
+            episode("s2e01", "S2E01 - Start"),
+            episode("s1e12", "S1E12 - Finale"),
+        ];
+        assert_eq!(
+            episodes_after_last(&cross_season, Some(&last_season_one))
+                .iter()
+                .map(|episode| episode.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["s2e01", "s2e02"]
+        );
     }
 
     #[test]

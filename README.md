@@ -153,6 +153,10 @@ Untuk Windows, hapus `animeku-cli.exe` dan `animeku.exe` dari `%USERPROFILE%\.ca
 
 ### Changelog
 
+#### v0.4.1 — Perbaikan urutan episode baru lintas season (21 Oktober 2026)
+
+- **Download Episode Baru** sekarang mendeteksi urutan daftar episode terbaru/terlama dengan memperhitungkan season, sehingga judul multi-season tidak salah mengambil episode lama.
+
 #### v0.4.0 — Prebuilt multi-platform, batch resume & AniList (21 Oktober 2026)
 
 - Rilis prebuilt sekarang tersedia untuk Windows x86_64, Linux x86_64/aarch64, dan macOS Intel/Apple Silicon. Setiap asset punya checksum SHA-256.
