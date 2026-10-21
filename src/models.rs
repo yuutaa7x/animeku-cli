@@ -75,6 +75,10 @@ pub struct WatchlistEntry {
     pub provider_type: usize,
     /// Unix timestamp (seconds) of when the title was added.
     pub added_at: u64,
+    /// Number of episodes seen the last time the watchlist checked this title.
+    /// `None` means the title has not been checked yet.
+    #[serde(default)]
+    pub known_episode_count: Option<usize>,
 }
 
 impl WatchlistEntry {
@@ -240,6 +244,7 @@ mod tests {
             },
             provider_type: 1,
             added_at: 1_700_000_000,
+            known_episode_count: Some(12),
         };
 
         let encoded = serde_json::to_string(&entry).unwrap();
@@ -247,6 +252,7 @@ mod tests {
         assert_eq!(decoded.movie.id, "solo-leveling");
         assert_eq!(decoded.provider_type, 1);
         assert_eq!(decoded.added_at, 1_700_000_000);
+        assert_eq!(decoded.known_episode_count, Some(12));
     }
 
     #[test]

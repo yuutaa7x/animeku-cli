@@ -10,17 +10,25 @@ echo.
 
 :: ---- STEP 1: Uninstall animeku-cli ----
 echo [1/4] Uninstalling animeku-cli...
+set "REMOVED=0"
+if exist "%USERPROFILE%\.cargo\bin\animeku-cli.exe" (
+    del /f /q "%USERPROFILE%\.cargo\bin\animeku-cli.exe" >nul 2>&1
+    if not exist "%USERPROFILE%\.cargo\bin\animeku-cli.exe" set "REMOVED=1"
+)
+if exist "%USERPROFILE%\.cargo\bin\animeku.exe" (
+    del /f /q "%USERPROFILE%\.cargo\bin\animeku.exe" >nul 2>&1
+    if not exist "%USERPROFILE%\.cargo\bin\animeku.exe" set "REMOVED=1"
+)
 where cargo >nul 2>&1
-if %ERRORLEVEL% NEQ 0 (
-    echo [SKIP] Cargo not found. animeku-cli may already be removed.
+if %ERRORLEVEL% EQU 0 (
+    cargo uninstall animeku-cli >nul 2>&1
+    if !ERRORLEVEL! EQU 0 set "REMOVED=1"
+)
+if "!REMOVED!"=="1" (
+    echo [OK] animeku-cli removed.
 ) else (
-    cargo uninstall animeku-cli
-    if exist "%USERPROFILE%\.cargo\bin\animeku.exe" del /f /q "%USERPROFILE%\.cargo\bin\animeku.exe" >nul 2>&1
-    if %ERRORLEVEL% EQU 0 (
-        echo [OK] animeku-cli removed.
-    ) else (
-        echo [WARN] animeku-cli was not installed or already removed.
-    )
+    echo [WARN] animeku-cli was not found or could not be removed.
+    echo        Close any running animeku-cli and try again.
 )
 echo.
 

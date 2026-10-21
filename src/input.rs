@@ -298,6 +298,10 @@ fn push_watchlist_entry(
     provider_type: usize,
     added_at: u64,
 ) {
+    let known_episode_count = watchlist
+        .iter()
+        .find(|entry| entry.provider_type == provider_type && entry.movie.id == movie.id)
+        .and_then(|entry| entry.known_episode_count);
     watchlist.retain(|entry| {
         !(entry.provider_type == provider_type && entry.movie.id == movie.id)
     });
@@ -307,6 +311,7 @@ fn push_watchlist_entry(
             movie: movie.clone(),
             provider_type,
             added_at,
+            known_episode_count,
         },
     );
 }
@@ -322,6 +327,21 @@ pub fn is_in_watchlist(provider_type: usize, movie_id: &str) -> bool {
     load_watchlist().iter().any(|entry| {
         entry.provider_type == provider_type && entry.movie.id == movie_id
     })
+}
+
+/// Remember how many episodes the provider listed when the watchlist was last
+/// checked. Used by the "Cek Episode Baru" notification flow.
+pub fn update_watchlist_episode_count(provider_type: usize, movie_id: &str, count: usize) {
+    let mut watchlist = load_watchlist();
+    if let Some(entry) = watchlist
+        .iter_mut()
+        .find(|entry| entry.provider_type == provider_type && entry.movie.id == movie_id)
+    {
+        if entry.known_episode_count != Some(count) {
+            entry.known_episode_count = Some(count);
+            write_watchlist(&watchlist);
+        }
+    }
 }
 
 pub fn delete_watchlist_entry(provider_type: usize, movie_id: &str) {

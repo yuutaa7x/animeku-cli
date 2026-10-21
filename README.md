@@ -14,7 +14,7 @@ https://github.com/user-attachments/assets/5d029903-ba1f-46c4-ab72-f021d8500a7c
 
 ### Instalasi
 > [!NOTE]
-> Pastikan kamu sudah menginstall Rust dan pemutar media (**mpv** sangat disarankan). Fitur **download episode** juga membutuhkan **ffmpeg**. Jika Rust belum ada, silakan klik [tautan berikut](https://rustup.rs/).
+> Pemutar media (**mpv** sangat disarankan) tetap dibutuhkan. Fitur **download episode** juga membutuhkan **ffmpeg**. Rust hanya dibutuhkan untuk instalasi manual atau saat fallback build dari source; installer prebuilt tidak memerlukan Rust. Jika ingin memasang Rust, klik [tautan berikut](https://rustup.rs/).
 >
 > - **Windows**: Install MPV dan ffmpeg melalui terminal (PowerShell / CMD):
 >   ```powershell
@@ -42,7 +42,7 @@ Buka terminal lalu jalankan:
 curl -sL https://raw.githubusercontent.com/yuutaa7x/animeku-cli/refs/heads/main/install.sh | bash
 ```
 
-Script akan otomatis menginstall Rust, MPV, dan ffmpeg jika belum ada, lalu build dan install animeku-cli.
+Installer akan mencoba binary rilis prebuilt terlebih dahulu (Linux x86_64/aarch64 dan macOS Intel/Apple Silicon), memverifikasi SHA-256, lalu memasangnya ke `~/.local/bin` atau `~/.cargo/bin`. Jika asset belum tersedia atau verifikasi gagal, installer otomatis fallback ke build dari source (Rust akan dipasang bila belum ada). MPV dan ffmpeg juga dipasang otomatis bila memungkinkan.
 
 #### Auto Install (Android / Termux — satu baris)
 
@@ -58,10 +58,31 @@ Tunggu instalasi selesai, lalu install VLC for Android dari Play Store sebelum m
 
 *Copy paste* perintah berikut:
 ```bash
-cargo install --git https://github.com/yuutaa7x/animeku-cli
+cargo install --git https://github.com/yuutaa7x/animeku-cli --locked
 ```
 
 Silakan tunggu proses penginstallan selesai dan jika sudah, ketik `animeku-cli` untuk menjalankannya.
+
+#### Update
+
+Binary hasil installer bisa memperbarui dirinya sendiri tanpa Rust:
+
+```bash
+animeku-cli --check-update   # cek versi terbaru
+animeku-cli --update         # unduh, verifikasi SHA-256, lalu pasang
+```
+
+Update juga tersedia lewat **Pengaturan → Perbarui Animeku-CLI**. Asset yang dipakai mengikuti platform:
+
+| Platform | Asset rilis |
+| --- | --- |
+| Windows x86_64 | `animeku-cli-windows-x86_64.exe` |
+| Linux x86_64 | `animeku-cli-linux-x86_64` |
+| Linux aarch64 | `animeku-cli-linux-aarch64` |
+| macOS Intel | `animeku-cli-macos-x86_64` |
+| macOS Apple Silicon | `animeku-cli-macos-aarch64` |
+
+Setiap asset disertai file `.sha256`. Jika asset tidak tersedia, update otomatis fallback ke `cargo install`. Source checkout lokal tetap memakai `git pull` + `cargo install --path .` agar perubahan development tidak tertimpa binary rilis.
 
 #### Troubleshooting Windows: konflik `/mingw64`
 
@@ -95,11 +116,14 @@ powershell -c "irm https://raw.githubusercontent.com/yuutaa7x/animeku-cli/refs/h
 curl -sL https://raw.githubusercontent.com/yuutaa7x/animeku-cli/refs/heads/main/uninstall.sh | bash
 ```
 
-#### Manual Uninstall (semua platform)
+#### Manual Uninstall (Linux / macOS)
 
 ```bash
-cargo uninstall animeku-cli
+cargo uninstall animeku-cli 2>/dev/null || true
+rm -f ~/.local/bin/animeku-cli ~/.local/bin/animeku ~/.cargo/bin/animeku-cli ~/.cargo/bin/animeku
 ```
+
+Untuk Windows, hapus `animeku-cli.exe` dan `animeku.exe` dari `%USERPROFILE%\.cargo\bin`.
 
 
 ### Keunggulan & Fitur
@@ -108,22 +132,38 @@ cargo uninstall animeku-cli
 - Hasil pencarian lengkap dengan pilihan server & resolusi (1080p, 720p, 480p, 360p).
 - Otomatis memuat Subtitle Indonesia langsung ke player.
 - Download episode dengan pilihan kualitas/server, progress bar, nama file kustom, dan folder tujuan.
-- Download batch/rentang episode dengan antrean berurutan, kualitas otomatis mengikuti pilihan awal, retry per episode, progres keseluruhan + estimasi sisa waktu, dan opsi lewati/timpa file yang sudah ada.
+- Download batch/rentang episode dengan antrean berurutan, kualitas otomatis mengikuti pilihan awal, progres keseluruhan + estimasi sisa waktu, dan opsi lewati/timpa file yang sudah ada.
+- Antrean batch disimpan otomatis ke `~/.animeku_batch_queue.json`. Kalau download dibatalkan atau gagal, menu **Lanjutkan Batch** dan opsi di pemilih episode bisa melanjutkan item yang belum selesai tanpa mengunduh ulang episode yang sudah beres.
+- Retry batch 3 kali dengan exponential backoff (1s, 2s). Episode yang tetap gagal dicatat ke `animeku-batch.log` di folder download, lalu dicoba lagi saat batch dilanjutkan.
 - Download bisa dibatalkan dengan `Esc`, `q`, atau `Ctrl+C`; ffmpeg dihentikan, file `.part` dibersihkan, dan ringkasan parsial ditampilkan.
-- Subtitle `.vtt` ikut disimpan di samping video hasil download. Default container: `.mkv` untuk HLS Idlix dan `.mp4` untuk direct Otakudesu.
+- Subtitle `.vtt` disimpan sebagai sidecar secara default. Pengaturan **Embed subtitle** bisa menanam subtitle langsung ke `.mkv`/`.mp4` (SRT/mov_text) agar video dan subtitle jadi satu file.
 - Terintegrasi dengan Discord Rich Presence (RPC).
 - Fitur Riwayat Tontonan multi-entry (menyimpan histori judul & episode yang ditonton).
 - Fitur Riwayat Pencarian (suggestion otomatis saat mengetik).
 - Resume Otomatis (melanjutkan episode dari menit/detik terakhir yang ditonton).
 - Auto-Next Episode setelah selesai memutar.
-- Pengaturan persisten: player default, auto-next, provider, Discord RPC, banner compact, poster episode, dan folder download.
-- Dukungan CLI flags untuk pencarian langsung, resume, pemilihan provider/player, dan menonaktifkan RPC.
+- Pengaturan persisten: player default, auto-next, provider, Discord RPC, banner compact, poster episode, embed subtitle, dan folder download.
+- Dukungan CLI flags untuk pencarian langsung, resume, update, cek update, pemilihan provider/player, dan menonaktifkan RPC.
 - Pengecekan dependensi dan Check Health sistem yang interaktif.
 - Retry otomatis dan fallback Idlix ↔ Otakudesu saat provider error atau tidak mengembalikan hasil.
 - Cache metadata persisten untuk hasil pencarian dan daftar episode, sehingga pencarian ulang lebih cepat tanpa mengambil stream lama.
 - Watchlist untuk menyimpan judul, lalu langsung memilih episode atau melanjutkan tontonan terakhir dari menu utama.
+- **Cek Episode Baru** di watchlist menyimpan jumlah episode terakhir dan memberi notifikasi berapa episode baru yang tersedia. Dari detail watchlist kamu juga bisa langsung **Download Episode Baru** sebagai batch.
+- **Jelajahi anime (AniList)** menampilkan trending anime, skor, tahun, genre, dan sinopsis. Detail AniList juga bisa dibuka dari watchlist.
 
 ### Changelog
+
+#### v0.4.0 — Prebuilt multi-platform, batch resume & AniList (21 Oktober 2026)
+
+- Rilis prebuilt sekarang tersedia untuk Windows x86_64, Linux x86_64/aarch64, dan macOS Intel/Apple Silicon. Setiap asset punya checksum SHA-256.
+- Installer Linux/macOS mencoba binary prebuilt lebih dulu, memverifikasi checksum, lalu fallback ke build source bila perlu. Windows installer tetap memakai asset `animeku-cli-windows-x86_64.exe`.
+- Self-update baru: `--check-update`, `--update`, dan menu **Pengaturan → Perbarui Animeku-CLI**. Binary rilis diunduh, diverifikasi, lalu diganti secara atomik; source checkout lokal tetap memakai `git pull` + `cargo install --path .`.
+- Antrean batch disimpan di `~/.animeku_batch_queue.json` dan bisa dilanjutkan dari menu utama atau pemilih episode. Status per episode (`Pending`, `Completed`, `Skipped`, `Failed`) tidak hilang saat aplikasi ditutup.
+- Retry batch dinaikkan menjadi 3 percobaan dengan exponential backoff. Kegagalan ditulis ke `animeku-batch.log` di folder download.
+- Pengaturan **Embed subtitle** menanam subtitle ke dalam `.mkv`/`.mp4`; sidecar `.vtt` tetap menjadi default.
+- Integrasi AniList: menu trending, detail skor/genre/sinopsis, dan tombol **Info AniList** di watchlist.
+- Watchlist menyimpan jumlah episode terakhir. Aksi **Cek Episode Baru** memberi notifikasi episode baru, dan **Download Episode Baru** membuat batch otomatis dari episode setelah tontonan terakhir.
+- Maintenance: release profile LTO + strip, HTTP client memakai rustls (tanpa OpenSSL), CI menjalankan clippy `-D warnings`, dan test baru untuk queue batch, checksum update, AniList, serta mapping subtitle.
 
 #### v0.3.8 — Progres batch & pembatalan download (21 Oktober 2026)
 

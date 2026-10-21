@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use colored::Colorize;
 
 use crate::{
+    batch::{BatchItemStatus, BatchQueue},
     ext::{self, Ext},
     input,
     models::{Episode, Meta, Movie, Stream},
@@ -27,7 +28,7 @@ pub struct AnimekuCli {
 const SEARCH_SEPARATOR: &str = "────────────────────────";
 const EPISODES_PER_PAGE: usize = 25;
 const PROVIDER_ATTEMPTS: usize = 3;
-const BATCH_DOWNLOAD_ATTEMPTS: usize = 2;
+const BATCH_DOWNLOAD_ATTEMPTS: usize = 3;
 
 /// Retry transient provider failures before giving up or switching providers.
 /// A short backoff keeps the UI responsive while still smoothing over momentary
@@ -518,11 +519,11 @@ fn choose_batch_stream<'a>(streams: &'a [Stream], target_title: &str) -> Option<
         .or_else(|| streams.first())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum BatchItemOutcome {
     Completed,
     Skipped,
-    Failed,
+    Failed(String),
     Cancelled,
 }
 
@@ -1405,17 +1406,17 @@ impl AnimekuCli {
             Ok(streams) if !streams.is_empty() => streams,
             Ok(_) => {
                 eprintln!("{} Server stream kosong.", "■".red());
-                return BatchItemOutcome::Failed;
+                return BatchItemOutcome::Failed("server stream kosong".into());
             }
             Err(error) => {
                 eprintln!("{} Gagal memuat stream: {:#}", "■".red(), error);
-                return BatchItemOutcome::Failed;
+                return BatchItemOutcome::Failed(format!("gagal memuat stream: {error:#}"));
             }
         };
 
         let Some(stream) = choose_batch_stream(&streams, target_title) else {
             eprintln!("{} Server stream kosong.", "■".red());
-            return BatchItemOutcome::Failed;
+            return BatchItemOutcome::Failed("server stream kosong".into());
         };
         if batch_quality_key(&stream.title) != batch_quality_key(target_title) {
             println!(
@@ -1439,7 +1440,10 @@ impl AnimekuCli {
                 "■".red(),
                 output.display()
             );
-            return BatchItemOutcome::Failed;
+            return BatchItemOutcome::Failed(format!(
+                "'{}' adalah folder, bukan nama file yang valid",
+                output.display()
+            ));
         }
         if output.exists() {
             match existing {
@@ -1467,7 +1471,8 @@ impl AnimekuCli {
                         BATCH_DOWNLOAD_ATTEMPTS,
                         error
                     );
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    let backoff = Duration::from_secs(1u64 << (attempt - 1));
+                    tokio::time::sleep(backoff).await;
                 }
                 Err(error) => {
                     eprintln!(
@@ -1476,15 +1481,159 @@ impl AnimekuCli {
                         BATCH_DOWNLOAD_ATTEMPTS,
                         error
                     );
+                    return BatchItemOutcome::Failed(format!("{error:#}"));
                 }
             }
         }
 
-        BatchItemOutcome::Failed
+        BatchItemOutcome::Failed("download gagal".into())
+    }
+
+    /// Run every pending or previously failed item in a persisted queue.
+    /// Completed/skipped items are never downloaded again.
+    pub async fn run_batch(&mut self, queue: &mut BatchQueue) -> anyhow::Result<()> {
+        let total = queue.episodes.len();
+        let pending = queue.pending_indices();
+        if pending.is_empty() {
+            println!("{} Semua episode di antrean sudah selesai.", "✓".green());
+            BatchQueue::clear();
+            return Ok(());
+        }
+
+        let directory = std::path::PathBuf::from(&queue.directory);
+        let started = Instant::now();
+        let already_done = total.saturating_sub(pending.len());
+        let mut processed = 0usize;
+        let mut cancelled = false;
+
+        for index in pending {
+            let episode = queue.episodes[index].clone();
+            println!(
+                "\n{} [{}/{}] {}",
+                "◆".blue(),
+                index + 1,
+                total,
+                episode.title.trim()
+            );
+
+            let outcome = self
+                .download_batch_episode(
+                    &queue.movie,
+                    &episode,
+                    &queue.target_quality,
+                    &directory,
+                    queue.existing,
+                )
+                .await;
+
+            match outcome {
+                BatchItemOutcome::Completed => {
+                    queue.mark(index, BatchItemStatus::Completed);
+                }
+                BatchItemOutcome::Skipped => {
+                    queue.mark(index, BatchItemStatus::Skipped);
+                }
+                BatchItemOutcome::Failed(error) => {
+                    eprintln!("{} {}", "■".red(), error);
+                    queue.log_error(&episode, &error);
+                    queue.mark(index, BatchItemStatus::Failed);
+                }
+                BatchItemOutcome::Cancelled => {
+                    cancelled = true;
+                    break;
+                }
+            }
+
+            processed += 1;
+            let _ = queue.save();
+            let (completed, skipped, failed, _) = queue.counts();
+            if !cancelled {
+                print_batch_status(
+                    already_done + processed,
+                    total,
+                    completed,
+                    skipped,
+                    failed,
+                    started,
+                );
+            }
+        }
+
+        let elapsed = started.elapsed().as_secs();
+        let (completed, skipped, failed, remaining_count) = queue.counts();
+        if cancelled {
+            println!(
+                "\n{} Batch dihentikan: {} berhasil • {} dilewati • {} gagal • {} belum diproses ({}).",
+                "■".yellow(),
+                completed,
+                skipped,
+                failed,
+                remaining_count,
+                crate::models::format_seconds(elapsed)
+            );
+            println!(
+                "  Antrean disimpan. Pilih menu 'Lanjutkan Batch' untuk melanjutkan nanti."
+            );
+        } else if remaining_count == 0 {
+            println!(
+                "\n{} Batch selesai: {} berhasil • {} dilewati • {} gagal • total {}.",
+                if failed == 0 {
+                    "✓".green()
+                } else {
+                    "■".yellow()
+                },
+                completed,
+                skipped,
+                failed,
+                crate::models::format_seconds(elapsed)
+            );
+            if failed > 0 {
+                println!(
+                    "  Log error: {}",
+                    directory.join("animeku-batch.log").display()
+                );
+            }
+            BatchQueue::clear();
+        } else {
+            println!(
+                "\n{} Batch selesai dengan {} episode tertunda.",
+                "■".yellow(),
+                remaining_count
+            );
+            println!(
+                "  Antrean disimpan. Pilih menu 'Lanjutkan Batch' untuk mencoba lagi."
+            );
+            if failed > 0 {
+                println!(
+                    "  Log error: {}",
+                    directory.join("animeku-batch.log").display()
+                );
+            }
+            let _ = queue.save();
+        }
+
+        Ok(())
+    }
+
+    pub async fn resolve_streams_for_episode(
+        &mut self,
+        episode: &Episode,
+    ) -> anyhow::Result<Vec<Stream>> {
+        self.current_episode = Some(episode.clone());
+        let message = format!("Memuat server stream '{}'...", episode.title.trim());
+        let streams = crate::util::with_spinner(
+            message,
+            retry_streams(self.extractor.as_ref(), episode),
+        )
+        .await?;
+        if streams.is_empty() {
+            anyhow::bail!("server stream kosong");
+        }
+        Ok(streams)
     }
 
     async fn download_batch(
-        &self,
+        &mut self,
         movie: &Movie,
         episodes: &[Episode],
         current_index: usize,
@@ -1523,6 +1672,16 @@ impl AnimekuCli {
             return Ok(false);
         }
 
+        let mut queue = BatchQueue::new(
+            self.provider_type,
+            movie.clone(),
+            range.to_vec(),
+            target_title.to_string(),
+            directory.clone(),
+            existing,
+        );
+        queue.save()?;
+
         println!(
             "\n{} Batch download: {} episode • kualitas '{}' • folder '{}'",
             "◆".blue(),
@@ -1531,77 +1690,7 @@ impl AnimekuCli {
             directory.display()
         );
 
-        let started = Instant::now();
-        let mut completed = 0usize;
-        let mut skipped = 0usize;
-        let mut failed = 0usize;
-        let mut processed = 0usize;
-        let mut cancelled = false;
-
-        'batch: for (offset, episode) in range.iter().enumerate() {
-            println!(
-                "\n{} [{}/{}] {}",
-                "◆".blue(),
-                offset + 1,
-                count,
-                episode.title.trim()
-            );
-
-            let outcome = self
-                .download_batch_episode(movie, episode, target_title, &directory, existing)
-                .await;
-
-            match outcome {
-                BatchItemOutcome::Completed => completed += 1,
-                BatchItemOutcome::Skipped => skipped += 1,
-                BatchItemOutcome::Failed => failed += 1,
-                BatchItemOutcome::Cancelled => {
-                    cancelled = true;
-                    break 'batch;
-                }
-            }
-
-            processed += 1;
-            if processed < count {
-                print_batch_status(processed, count, completed, skipped, failed, started);
-            }
-        }
-
-        let elapsed = started.elapsed().as_secs();
-        if cancelled {
-            let remaining = count.saturating_sub(processed);
-            println!(
-                "\n{} Batch dihentikan: {} berhasil • {} dilewati • {} gagal • {} belum diproses ({}).",
-                "■".yellow(),
-                completed,
-                skipped,
-                failed,
-                remaining,
-                crate::models::format_seconds(elapsed)
-            );
-            println!(
-                "  Jalankan batch lagi dengan opsi lewati file yang sudah ada untuk melanjutkan."
-            );
-        } else {
-            println!(
-                "\n{} Batch selesai: {} berhasil • {} dilewati • {} gagal • total {}.",
-                if failed == 0 {
-                    "✓".green()
-                } else {
-                    "■".yellow()
-                },
-                completed,
-                skipped,
-                failed,
-                crate::models::format_seconds(elapsed)
-            );
-            if failed > 0 {
-                println!(
-                    "  Jalankan batch lagi dengan opsi lewati file yang sudah ada untuk melanjutkan yang gagal."
-                );
-            }
-        }
-
+        self.run_batch(&mut queue).await?;
         Ok(true)
     }
 
@@ -1709,6 +1798,13 @@ impl AnimekuCli {
                 .current_episode
                 .as_ref()
                 .is_some_and(|episode| episode.is_series);
+        let saved_batch = BatchQueue::load().filter(|queue| {
+            queue.provider_type == active_provider
+                && active_movie
+                    .as_ref()
+                    .is_some_and(|movie| movie.id == queue.movie.id)
+                && !queue.is_done()
+        });
 
         loop {
             let mut opts = streams.clone();
@@ -1720,6 +1816,12 @@ impl AnimekuCli {
                 opts.push(Stream {
                     url: "download_batch".into(),
                     title: "[ ⬇ Download Batch Episode... ]".into(),
+                });
+            }
+            if saved_batch.is_some() {
+                opts.push(Stream {
+                    url: "resume_batch".into(),
+                    title: "[ ⏯ Lanjutkan Batch Terakhir ]".into(),
                 });
             }
             if active_movie.is_some() {
@@ -1822,6 +1924,26 @@ impl AnimekuCli {
                         continue;
                     }
                 }
+            }
+
+            if selected.url == "resume_batch" {
+                if let Some(mut queue) = BatchQueue::load() {
+                    if queue.provider_type == self.provider_type
+                        && active_movie
+                            .as_ref()
+                            .is_some_and(|movie| movie.id == queue.movie.id)
+                    {
+                        if let Err(error) = self.run_batch(&mut queue).await {
+                            eprintln!("{} Batch download gagal: {:#}", "■".red(), error);
+                            println!();
+                            println!("Tekan Enter untuk kembali...");
+                            let mut dummy = String::new();
+                            let _ = std::io::stdin().read_line(&mut dummy);
+                        }
+                        return Ok(None);
+                    }
+                }
+                continue;
             }
 
             if selected.url == "watchlist" {

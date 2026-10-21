@@ -13,11 +13,13 @@ pkg upgrade -y
 
 echo "[2/4] Menginstall Dependensi (Rust)..."
 # Termux di-setting untuk memakai Native Android Video Player (VLC / MX Player)
-# pkg-config dan openssl dibutuhkan untuk mengompilasi library reqwest
-pkg install rust binutils pkg-config openssl ffmpeg -y
+# clang/make dibutuhkan untuk mengompilasi ring (TLS rustls); openssl tidak lagi diperlukan.
+pkg install rust binutils pkg-config clang make ffmpeg -y
 
 echo "[3/4] Build & Install Animeku-CLI..."
-cargo install --git https://github.com/yuutaa7x/animeku-cli
+echo "Termux memakai binary Android (bionic), jadi instalasi tetap build dari source."
+cargo install --git https://github.com/yuutaa7x/animeku-cli --locked --force
+cp -f "$HOME/.cargo/bin/animeku-cli" "$HOME/.cargo/bin/animeku" 2>/dev/null || true
 
 echo "Mengatur PATH agar animeku-cli bisa langsung dijalankan..."
 if [[ ":$PATH:" != *":$HOME/.cargo/bin:"* ]]; then

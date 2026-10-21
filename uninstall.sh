@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -u
 
 echo ""
 echo "  ====================================================="
@@ -7,20 +7,28 @@ echo "    animeku-cli Auto Uninstaller for Linux / macOS"
 echo "  ====================================================="
 echo ""
 
-if ! command -v cargo &> /dev/null; then
-    echo "[ERROR] Rust/cargo not found. Cannot uninstall."
-    exit 1
+REMOVED=0
+
+if command -v cargo >/dev/null 2>&1; then
+    if cargo uninstall animeku-cli >/dev/null 2>&1; then
+        REMOVED=1
+    fi
 fi
 
-echo "[1/1] Uninstalling animeku-cli via cargo..."
-cargo uninstall animeku-cli
+for dir in "$HOME/.local/bin" "$HOME/.cargo/bin"; do
+    for name in animeku-cli animeku; do
+        if [ -e "$dir/$name" ]; then
+            rm -f "$dir/$name" 2>/dev/null && REMOVED=1
+        fi
+    done
+done
 
-if [ $? -eq 0 ]; then
-    echo ""
+echo ""
+if [ "$REMOVED" -eq 1 ]; then
     echo "  ====================================================="
     echo "    SUCCESS! animeku-cli uninstalled!"
     echo "  ====================================================="
 else
-    echo ""
-    echo "  [ERROR] Uninstallation failed. Check errors above."
+    echo "  [WARN] animeku-cli was not found or could not be removed."
+    echo "         Close any running animeku-cli and try again."
 fi

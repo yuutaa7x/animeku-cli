@@ -151,7 +151,7 @@ echo.
 echo [4/4] Installing animeku-cli from source...
 echo.
 
-cargo install --git https://github.com/yuutaa7x/animeku-cli --locked
+cargo install --git https://github.com/yuutaa7x/animeku-cli --locked --force
 if %ERRORLEVEL% NEQ 0 (
     echo.
     echo  [ERROR] Installation failed. Check errors above.
@@ -229,7 +229,11 @@ if not exist "%TEMP%\animeku-cli.exe" (
 
 :: Verify the checksum when the release provides one.
 curl -fsSL -o "%TEMP%\animeku-cli.exe.sha256" "!ANIMEKU_URL!.sha256" >nul 2>&1
-if not exist "%TEMP%\animeku-cli.exe.sha256" goto :prebuilt_install
+if not exist "%TEMP%\animeku-cli.exe.sha256" (
+    echo [WARN] Checksum is not available. Falling back to source build.
+    del /q "%TEMP%\animeku-cli.exe" >nul 2>&1
+    exit /b 0
+)
 call :verify_prebuilt_checksum
 if !ERRORLEVEL! NEQ 0 (
     echo [WARN] Checksum mismatch. Falling back to source build.

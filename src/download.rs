@@ -34,7 +34,8 @@ pub enum DownloadResult {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ExistingFilePolicy {
     Skip,
     Overwrite,
@@ -206,6 +207,7 @@ pub fn download_to_path(
         &stream.url,
         audio.as_deref(),
         subtitle.as_deref(),
+        Config::load().embed_subtitles,
         output_path,
     )
 }
@@ -520,6 +522,8 @@ fn build_ffmpeg_command(
     provider_type: usize,
     url: &str,
     audio: Option<&str>,
+    subtitle: Option<&str>,
+    embed_subtitles: bool,
     output: &Path,
 ) -> Command {
     let mut command = Command::new(crate::resolve_command_path("ffmpeg"));
@@ -537,12 +541,37 @@ fn build_ffmpeg_command(
     command.args(input_options(provider_type, url));
     command.arg("-i").arg(url);
 
-    if let Some(audio) = audio {
+    let mut next_input = 1;
+    let audio_input = if let Some(audio) = audio {
         command.args(input_options(provider_type, audio));
         command.arg("-i").arg(audio);
-        command.args(["-map", "0:v:0", "-map", "1:a:0"]);
+        let index = next_input;
+        next_input += 1;
+        Some(index)
+    } else {
+        None
+    };
+
+    let subtitle_input = if embed_subtitles {
+        subtitle.map(|subtitle| {
+            command.arg("-i").arg(subtitle);
+            let index = next_input;
+            next_input += 1;
+            index
+        })
+    } else {
+        None
+    };
+
+    if let Some(audio_input) = audio_input {
+        command
+            .args(["-map", "0:v:0", "-map"])
+            .arg(format!("{audio_input}:a:0"));
     } else {
         command.args(["-map", "0:v:0?", "-map", "0:a:0?"]);
+    }
+    if let Some(subtitle_input) = subtitle_input {
+        command.arg("-map").arg(format!("{subtitle_input}:s:0"));
     }
 
     command.args(["-c", "copy"]);
@@ -552,6 +581,14 @@ fn build_ffmpeg_command(
         .and_then(|extension| extension.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
+    if subtitle_input.is_some() {
+        if extension == "mp4" || extension == "m4v" {
+            command.args(["-c:s", "mov_text"]);
+        } else {
+            command.args(["-c:s", "srt"]);
+        }
+        command.args(["-metadata:s:s:0", "language=ind"]);
+    }
     if extension == "mp4" || extension == "m4v" {
         if provider_type == ext::PROVIDER_IDLIX || url.to_ascii_lowercase().contains(".m3u8") {
             command.args(["-bsf:a", "aac_adtstoasc"]);
@@ -640,6 +677,7 @@ fn run_ffmpeg(
     url: &str,
     audio: Option<&str>,
     subtitle: Option<&str>,
+    embed_subtitles: bool,
     output: &Path,
 ) -> Result<DownloadResult> {
     let duration = probe_duration(provider_type, url);
@@ -650,7 +688,8 @@ fn run_ffmpeg(
 
     println!("{} Mengunduh dengan ffmpeg...", "◆".blue());
     println!("  {} Tekan Esc/q/Ctrl+C untuk membatalkan.", "•".dimmed());
-    let mut command = build_ffmpeg_command(provider_type, url, audio, &partial);
+    let mut command =
+        build_ffmpeg_command(provider_type, url, audio, subtitle, embed_subtitles, &partial);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -804,7 +843,11 @@ fn run_ffmpeg(
     );
 
     if let Some(subtitle) = subtitle {
-        copy_subtitle(Path::new(subtitle), output);
+        if embed_subtitles {
+            println!("  {} Subtitle ditanam ke dalam video.", "•".dimmed());
+        } else {
+            copy_subtitle(Path::new(subtitle), output);
+        }
     }
 
     Ok(DownloadResult::Completed)
@@ -1011,6 +1054,8 @@ mod tests {
             ext::PROVIDER_IDLIX,
             "/tmp/video.m3u8",
             Some("/tmp/audio.m3u8"),
+            None,
+            false,
             output,
         );
         let args = command
@@ -1025,6 +1070,30 @@ mod tests {
         );
         assert!(args.iter().any(|arg| arg == "-map"));
         assert!(args.iter().any(|arg| arg == "-c"));
+    }
+
+    #[test]
+    fn embedded_subtitle_is_mapped_and_converted() {
+        let output = Path::new("/tmp/Movie.mkv");
+        let command = build_ffmpeg_command(
+            ext::PROVIDER_IDLIX,
+            "/tmp/video.m3u8",
+            Some("/tmp/audio.m3u8"),
+            Some("/tmp/subtitle.vtt"),
+            true,
+            output,
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let has_pair = |first: &str, second: &str| {
+            args.windows(2)
+                .any(|pair| pair[0] == first && pair[1] == second)
+        };
+        assert!(has_pair("-map", "2:s:0"));
+        assert!(has_pair("-c:s", "srt"));
+        assert!(has_pair("-metadata:s:s:0", "language=ind"));
     }
 
     #[test]
@@ -1109,7 +1178,8 @@ mod live_smoke_tests {
             let audio = Path::new(&audio_path)
                 .is_file()
                 .then_some(audio_path.as_str());
-            let command = build_ffmpeg_command(ext::PROVIDER_IDLIX, &stream.url, audio, &output);
+            let command =
+                build_ffmpeg_command(ext::PROVIDER_IDLIX, &stream.url, audio, None, false, &output);
             let result = run_limited(command, 10);
             assert!(
                 result.status.success(),
@@ -1148,8 +1218,14 @@ mod live_smoke_tests {
             for stream in &streams {
                 println!("Trying {} -> {}", stream.title, stream.url);
                 let output = dir.join("otakudesu-smoke.mp4");
-                let command =
-                    build_ffmpeg_command(ext::PROVIDER_OTAKUDESU, &stream.url, None, &output);
+                let command = build_ffmpeg_command(
+                    ext::PROVIDER_OTAKUDESU,
+                    &stream.url,
+                    None,
+                    None,
+                    false,
+                    &output,
+                );
                 let result = run_limited(command, 10);
                 if result.status.success() {
                     println!("OK: {}", stream.title);

@@ -31,5 +31,8 @@ jobs:
       - name: Cargo Check
         run: cargo check --verbose
 
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
       - name: Run Tests
         run: cargo test --verbose

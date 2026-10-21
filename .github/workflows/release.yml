@@ -10,11 +10,37 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
 
 jobs:
-  build-windows:
-    name: Build Windows x86_64
-    runs-on: windows-latest
+  build:
+    name: Build ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: animeku-cli-windows-x86_64.exe
+            cross: false
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            asset: animeku-cli-linux-x86_64
+            cross: false
+          - os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            asset: animeku-cli-linux-aarch64
+            cross: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            asset: animeku-cli-macos-x86_64
+            cross: false
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: animeku-cli-macos-aarch64
+            cross: false
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -22,32 +48,57 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.target }}
 
       - name: Setup Rust caching
         uses: swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build release binary (cross)
+        if: matrix.cross
+        run: cross build --release --locked --target ${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Package binary and checksum
+      - name: Package binary and checksum (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item "target/x86_64-pc-windows-msvc/release/animeku-cli.exe" "dist/animeku-cli-windows-x86_64.exe"
-          $hash = (Get-FileHash "dist/animeku-cli-windows-x86_64.exe" -Algorithm SHA256).Hash.ToLower()
-          "$hash  animeku-cli-windows-x86_64.exe" | Out-File -Encoding ascii "dist/animeku-cli-windows-x86_64.exe.sha256"
+          Copy-Item "target/${{ matrix.target }}/release/animeku-cli.exe" "dist/${{ matrix.asset }}"
+          $hash = (Get-FileHash "dist/${{ matrix.asset }}" -Algorithm SHA256).Hash.ToLower()
+          "$hash  ${{ matrix.asset }}" | Out-File -Encoding ascii "dist/${{ matrix.asset }}.sha256"
+
+      - name: Package binary and checksum (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/animeku-cli" "dist/${{ matrix.asset }}"
+          chmod +x "dist/${{ matrix.asset }}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd dist && sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256")
+          else
+            (cd dist && shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256")
+          fi
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: animeku-cli-windows-x86_64
+          name: ${{ matrix.asset }}
           path: dist/*
           if-no-files-found: error
 
   release:
     name: Publish GitHub release
-    needs: build-windows
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - name: Download build artifacts
@@ -56,7 +107,7 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Create release
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*

@@ -9,7 +9,9 @@ use tokio::runtime;
 
 use crate::{input::{get_user_input, load_history, save_history, pick_provider, load_watch_history, delete_watch_entry, delete_search_history_entry}, util::clearscreen_and_show_banner};
 
+mod anilist;
 mod animeku;
+mod batch;
 mod cache;
 mod config;
 mod download;
@@ -19,6 +21,7 @@ mod input;
 mod live_input;
 mod models;
 mod proxy;
+mod update;
 mod util;
 
 use episode::{
@@ -56,6 +59,8 @@ struct CliArgs {
     player: Option<config::PlayerChoice>,
     resume: bool,
     no_rpc: bool,
+    update: bool,
+    check_update: bool,
 }
 
 static CLI_ARGS: OnceLock<CliArgs> = OnceLock::new();
@@ -80,9 +85,17 @@ fn cli_resume() -> bool {
     CLI_ARGS.get().is_some_and(|args| args.resume)
 }
 
+fn cli_update() -> bool {
+    CLI_ARGS.get().is_some_and(|args| args.update)
+}
+
+fn cli_check_update() -> bool {
+    CLI_ARGS.get().is_some_and(|args| args.check_update)
+}
+
 fn print_help() {
     println!(
-        "Animeku-CLI v{}\n\nUsage:\n  animeku-cli [OPTIONS] [JUDUL]\n\nOptions:\n  --search <JUDUL>       Langsung cari judul tanpa membuka menu utama\n  --provider <PROVIDER>  auto, idlix, atau otakudesu\n  --player <PLAYER>      ask, mpv, vlc, atau browser\n  --resume               Lanjutkan tontonan terakhir\n  --no-rpc               Matikan Discord Rich Presence untuk sesi ini\n  -h, --help             Tampilkan bantuan\n  -V, --version          Tampilkan versi",
+        "Animeku-CLI v{}\n\nUsage:\n  animeku-cli [OPTIONS] [JUDUL]\n\nOptions:\n  --search <JUDUL>       Langsung cari judul tanpa membuka menu utama\n  --provider <PROVIDER>  auto, idlix, atau otakudesu\n  --player <PLAYER>      ask, mpv, vlc, atau browser\n  --resume               Lanjutkan tontonan terakhir\n  --update               Unduh dan pasang pembaruan terbaru\n  --check-update         Cek versi terbaru tanpa memasang\n  --no-rpc               Matikan Discord Rich Presence untuk sesi ini\n  -h, --help             Tampilkan bantuan\n  -V, --version          Tampilkan versi",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -107,6 +120,8 @@ fn parse_args() -> anyhow::Result<CliArgs> {
                 std::process::exit(0);
             }
             "--resume" => args.resume = true,
+            "--update" => args.update = true,
+            "--check-update" => args.check_update = true,
             "--no-rpc" => args.no_rpc = true,
             "--search" => {
                 let Some(value) = iter.next() else {
@@ -1292,10 +1307,152 @@ async fn handle_resume_latest(discord: &mut Option<DiscordIpcClient>) -> anyhow:
     resume_watch_entry(discord, &entry, entry.position_seconds).await
 }
 
+async fn handle_explore(discord: &mut Option<DiscordIpcClient>) -> anyhow::Result<()> {
+    clearscreen_and_show_banner()?;
+    let media = match crate::util::with_spinner(
+        "Mengambil trending anime dari AniList...",
+        crate::anilist::trending(20),
+    )
+    .await
+    {
+        Ok(media) => media,
+        Err(error) => {
+            eprintln!("{} Gagal memuat trending AniList: {:#}", "■".red(), error);
+            println!();
+            println!("Tekan Enter untuk kembali...");
+            let mut dummy = String::new();
+            let _ = std::io::stdin().read_line(&mut dummy);
+            return Ok(());
+        }
+    };
+
+    if media.is_empty() {
+        println!("Tidak ada hasil trending dari AniList.\n");
+        println!("Tekan Enter untuk kembali...");
+        let mut dummy = String::new();
+        let _ = std::io::stdin().read_line(&mut dummy);
+        return Ok(());
+    }
+
+    loop {
+        clearscreen_and_show_banner()?;
+        let mut entries = Vec::with_capacity(media.len() + 2);
+        for info in &media {
+            let mut facts = Vec::new();
+            if let Some(score) = info.average_score {
+                facts.push(format!("{score}"));
+            }
+            if let Some(year) = info.year {
+                facts.push(year.to_string());
+            }
+            let suffix = if facts.is_empty() {
+                String::new()
+            } else {
+                format!(" • {}", facts.join(" • "))
+            };
+            entries.push(input::MenuEntry::new(format!("{}{}", info.title, suffix)));
+        }
+        entries.push(input::MenuEntry::new("Cari info anime lain"));
+        entries.push(input::MenuEntry::new("Kembali"));
+
+        let Some(choice) =
+            input::select_menu_simple("Trending Anime (AniList):", &entries, 0)?
+        else {
+            break;
+        };
+
+        if choice < media.len() {
+            run_cli_search(discord, media[choice].title.clone()).await?;
+            continue;
+        }
+
+        if choice == media.len() {
+            let title: String = dialoguer::Input::with_theme(&crate::util::custom_theme())
+                .with_prompt("Judul anime")
+                .interact_text()?;
+            let title = title.trim();
+            if title.is_empty() {
+                continue;
+            }
+
+            clearscreen_and_show_banner()?;
+            match crate::anilist::search(title).await {
+                Ok(Some(info)) => {
+                    if let Some(cover) = &info.cover_url {
+                        crate::util::show_image_thumb(cover.clone()).await;
+                    }
+                    println!("{}", crate::anilist::format_info(&info));
+                }
+                Ok(None) => println!("Tidak ditemukan di AniList."),
+                Err(error) => eprintln!("{} Gagal memuat info AniList: {:#}", "■".red(), error),
+            }
+            println!("\nTekan Enter untuk kembali...");
+            let mut dummy = String::new();
+            let _ = std::io::stdin().read_line(&mut dummy);
+            continue;
+        }
+
+        break;
+    }
+
+    Ok(())
+}
+
+async fn handle_resume_batch() -> anyhow::Result<()> {
+    clearscreen_and_show_banner()?;
+    let Some(mut queue) = crate::batch::BatchQueue::load() else {
+        println!("Tidak ada antrean batch yang tersimpan.\n");
+        println!("Tekan Enter untuk kembali...");
+        let mut dummy = String::new();
+        let _ = std::io::stdin().read_line(&mut dummy);
+        return Ok(());
+    };
+
+    if queue.is_done() {
+        crate::batch::BatchQueue::clear();
+        println!("Antrean batch terakhir sudah selesai.\n");
+        println!("Tekan Enter untuk kembali...");
+        let mut dummy = String::new();
+        let _ = std::io::stdin().read_line(&mut dummy);
+        return Ok(());
+    }
+
+    let (completed, skipped, failed, pending) = queue.counts();
+    println!("Antrean Batch Tersimpan:");
+    println!(
+        "  Judul    : {}",
+        crate::models::clean_movie_title(&queue.movie.title)
+    );
+    println!("  Provider : {}", ext::provider_name(queue.provider_type));
+    println!("  Kualitas : {}", queue.target_quality);
+    println!("  Folder   : {}", queue.directory);
+    println!(
+        "  Progres  : {} berhasil • {} dilewati • {} gagal • {} tertunda",
+        completed, skipped, failed, pending
+    );
+    println!();
+
+    if !confirm_action("Lanjutkan batch sekarang?")? {
+        return Ok(());
+    }
+
+    let mut animeku = AnimekuCli::for_provider(queue.provider_type);
+    if let Err(error) = animeku.run_batch(&mut queue).await {
+        eprintln!("{} Batch download gagal: {:#}", "■".red(), error);
+        println!();
+        println!("Tekan Enter untuk kembali...");
+        let mut dummy = String::new();
+        let _ = std::io::stdin().read_line(&mut dummy);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MainAction {
     Continue,
+    Batch,
     Search,
+    Explore,
     Watchlist,
     History,
     Settings,
@@ -1320,6 +1477,22 @@ fn show_main_menu() -> anyhow::Result<Option<MainAction>> {
         actions.push(MainAction::Continue);
     }
 
+    if let Some(queue) = crate::batch::BatchQueue::load() {
+        if queue.is_done() {
+            crate::batch::BatchQueue::clear();
+        } else {
+            let (completed, skipped, failed, pending) = queue.counts();
+            entries.push(input::MenuEntry::new(format!(
+                "[ Lanjutkan Batch: {} | {}/{} selesai, {} tertunda ]",
+                crate::models::clean_movie_title(&queue.movie.title),
+                completed + skipped + failed,
+                queue.episodes.len(),
+                pending
+            )));
+            actions.push(MainAction::Batch);
+        }
+    }
+
     let watchlist_count = input::load_watchlist().len();
     let watchlist_label = if watchlist_count > 0 {
         format!("Watchlist ({})", watchlist_count)
@@ -1328,6 +1501,7 @@ fn show_main_menu() -> anyhow::Result<Option<MainAction>> {
     };
     for (label, action) in [
         ("Cari anime / film".to_string(), MainAction::Search),
+        ("Jelajahi anime (AniList)".to_string(), MainAction::Explore),
         (watchlist_label, MainAction::Watchlist),
         ("Riwayat".to_string(), MainAction::History),
         ("Pengaturan".to_string(), MainAction::Settings),
@@ -1470,6 +1644,14 @@ async fn handle_settings_menu(discord: &mut Option<DiscordIpcClient>) -> anyhow:
                 if config.show_posters { "Aktif" } else { "Mati" }
             ),
             format!(
+                "Embed subtitle: {}",
+                if config.embed_subtitles {
+                    "Aktif"
+                } else {
+                    "Mati (sidecar .vtt)"
+                }
+            ),
+            format!(
                 "Folder download: {}",
                 config
                     .download_dir
@@ -1520,30 +1702,34 @@ async fn handle_settings_menu(discord: &mut Option<DiscordIpcClient>) -> anyhow:
                 config.show_posters = !config.show_posters;
                 config.save();
             }
-            6 => choose_download_dir_setting(&mut config)?,
-            7 => {
+            6 => {
+                config.embed_subtitles = !config.embed_subtitles;
+                config.save();
+            }
+            7 => choose_download_dir_setting(&mut config)?,
+            8 => {
                 if confirm_action("Hapus semua riwayat pencarian?")? {
                     input::clear_search_history();
                 }
             }
-            8 => {
+            9 => {
                 if confirm_action("Hapus semua riwayat tontonan?")? {
                     input::clear_watch_history();
                 }
             }
-            9 => {
+            10 => {
                 if confirm_action("Hapus semua watchlist?")? {
                     input::clear_watchlist();
                 }
             }
-            10 => {
+            11 => {
                 if confirm_action("Hapus cache metadata, deteksi, dan pilihan provider?")? {
                     crate::cache::clear();
                     input::clear_provider_detections();
                     input::clear_search_providers();
                 }
             }
-            11 => handle_self_update()?,
+            12 => handle_self_update(true).await?,
             _ => break,
         }
     }
@@ -1575,12 +1761,80 @@ fn local_update_repo() -> Option<std::path::PathBuf> {
     Some(manifest)
 }
 
-fn handle_self_update() -> anyhow::Result<()> {
+fn pause_after_update(wait_for_enter: bool) {
+    if !wait_for_enter {
+        return;
+    }
+    println!("\nTekan Enter untuk kembali ke menu...");
+    let mut dummy = String::new();
+    let _ = std::io::stdin().read_line(&mut dummy);
+}
+
+async fn handle_check_update() -> anyhow::Result<()> {
+    println!("Versi terpasang: {}", update::current_version());
+    match update::check().await {
+        Ok(Some(latest)) => {
+            println!("Versi terbaru  : v{latest}");
+            println!("Jalankan `animeku-cli --update` untuk memasangnya.");
+        }
+        Ok(None) => println!("Kamu sudah memakai versi terbaru."),
+        Err(error) => println!("Gagal memeriksa pembaruan: {error:#}"),
+    }
+    Ok(())
+}
+
+async fn handle_self_update(wait_for_enter: bool) -> anyhow::Result<()> {
     clearscreen_and_show_banner()?;
     println!("{} Memeriksa dan mengunduh pembaruan...", "◆".blue());
     println!("  Repository: {}\n", REPO_URL.cyan());
 
-    let bin_name = if cfg!(target_os = "windows") { "animeku-cli.exe" } else { "animeku-cli" };
+    // Developers running from a checkout expect `git pull` + a local build.
+    // Installed binaries use the prebuilt release asset so Rust is optional.
+    if local_update_repo().is_some() {
+        return handle_source_update(wait_for_enter);
+    }
+
+    match update::install_latest().await {
+        Ok(update::UpdateOutcome::Updated { from, to, path }) => {
+            println!(
+                "\n  {} Pembaruan berhasil: v{} -> v{}",
+                "✓".green(),
+                from,
+                to
+            );
+            println!("  Binary: {}", path.display());
+            println!("  Silakan jalankan ulang aplikasi.");
+        }
+        Ok(update::UpdateOutcome::UpToDate { current, latest }) => {
+            println!(
+                "\n  {} Sudah versi terbaru (v{}; rilis terbaru v{}).",
+                "✓".green(),
+                current,
+                latest
+            );
+        }
+        Ok(update::UpdateOutcome::Unavailable(reason)) => {
+            println!("\n  {} {}.", "ℹ".yellow(), reason);
+            println!("  Fallback ke build dari source...");
+            return handle_source_update(wait_for_enter);
+        }
+        Err(error) => {
+            println!("\n  {} Update prebuilt gagal: {:#}", "■".red(), error);
+            println!("  Fallback ke build dari source...");
+            return handle_source_update(wait_for_enter);
+        }
+    }
+
+    pause_after_update(wait_for_enter);
+    Ok(())
+}
+
+fn handle_source_update(wait_for_enter: bool) -> anyhow::Result<()> {
+    let bin_name = if cfg!(target_os = "windows") {
+        "animeku-cli.exe"
+    } else {
+        "animeku-cli"
+    };
     let local_repo = local_update_repo();
 
     // Check requirements before touching the executable, otherwise an early
@@ -1588,21 +1842,20 @@ fn handle_self_update() -> anyhow::Result<()> {
     if local_repo.is_some() && !check_command_exists("git") {
         println!("\n  {} git tidak ditemukan di PATH.", "■".red());
         println!("  Silakan install git terlebih dahulu, lalu jalankan ulang update ini.");
-        println!("\nTekan Enter untuk kembali ke menu...");
-        let mut dummy = String::new();
-        let _ = std::io::stdin().read_line(&mut dummy);
+        pause_after_update(wait_for_enter);
         return Ok(());
     }
     if !check_command_exists("cargo") {
-        println!("\n  {} cargo / Rust toolchain tidak ditemukan di PATH.", "■".red());
+        println!(
+            "\n  {} cargo / Rust toolchain tidak ditemukan di PATH.",
+            "■".red()
+        );
         println!("  Install Rust dari https://rustup.rs/ lalu jalankan ulang update ini.");
-        println!("\nTekan Enter untuk kembali ke menu...");
-        let mut dummy = String::new();
-        let _ = std::io::stdin().read_line(&mut dummy);
+        pause_after_update(wait_for_enter);
         return Ok(());
     }
 
-    // On Windows, rename running executable before cargo install to avoid file locking
+    // On Windows, rename running executable before cargo install to avoid file locking.
     let mut renamed_old: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
     if cfg!(target_os = "windows") {
         if let Ok(current_exe) = std::env::current_exe() {
@@ -1615,16 +1868,23 @@ fn handle_self_update() -> anyhow::Result<()> {
     }
 
     let status = if let Some(repo) = local_repo.as_ref() {
-        println!("{} Terdeteksi source checkout lokal di {}. Menjalankan git pull & cargo install...", "ℹ".yellow(), repo.display());
-        let _ = Command::new("git").args(["pull", "origin", "main"]).current_dir(repo).status();
+        println!(
+            "{} Terdeteksi source checkout lokal di {}. Menjalankan git pull & cargo install...",
+            "ℹ".yellow(),
+            repo.display()
+        );
+        let _ = Command::new("git")
+            .args(["pull", "origin", "main"])
+            .current_dir(repo)
+            .status();
         Command::new("cargo")
-            .args(["install", "--path", ".", "--force"])
+            .args(["install", "--path", ".", "--locked", "--force"])
             .current_dir(repo)
             .status()
     } else {
         println!("{} Mengunduh dan mengompilasi dari GitHub...", "◆".blue());
         Command::new("cargo")
-            .args(["install", "--git", REPO_URL, "--force"])
+            .args(["install", "--git", REPO_URL, "--locked", "--force"])
             .status()
     };
 
@@ -1657,13 +1917,11 @@ fn handle_self_update() -> anyhow::Result<()> {
             }
             println!("\n  {} Gagal memperbarui secara otomatis.", "■".red());
             println!("  Silakan jalankan secara manual:");
-            println!("  cargo install --git {} --force", REPO_URL);
+            println!("  cargo install --git {} --locked --force", REPO_URL);
         }
     }
 
-    println!("\nTekan Enter untuk kembali ke menu...");
-    let mut dummy = String::new();
-    let _ = std::io::stdin().read_line(&mut dummy);
+    pause_after_update(wait_for_enter);
     Ok(())
 }
 
@@ -1957,8 +2215,182 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
 enum WatchlistAction {
     OpenEpisodes,
     Resume,
+    DownloadNewEpisodes,
+    InfoAniList,
     Remove,
     Back,
+}
+
+/// Providers may return episodes newest-first or oldest-first. Compare the
+/// first and last episode numbers to detect the direction, then return only
+/// episodes newer than the last watched one in chronological order.
+fn episodes_after_last(
+    episodes: &[crate::models::Episode],
+    last: Option<&crate::models::WatchEntry>,
+) -> Vec<crate::models::Episode> {
+    let Some(last) = last else {
+        return episodes.to_vec();
+    };
+    let Some(index) = episodes
+        .iter()
+        .position(|episode| episode.id == last.episode.id)
+    else {
+        return episodes.to_vec();
+    };
+
+    let first_number = episodes
+        .first()
+        .and_then(|episode| crate::episode::episode_number(&episode.title));
+    let last_number = episodes
+        .last()
+        .and_then(|episode| crate::episode::episode_number(&episode.title));
+    let newest_first = matches!(
+        (first_number, last_number),
+        (Some(first), Some(last)) if first > last
+    );
+
+    if newest_first {
+        let mut new_episodes = episodes[..index].to_vec();
+        new_episodes.reverse();
+        new_episodes
+    } else {
+        episodes[index + 1..].to_vec()
+    }
+}
+
+async fn handle_watchlist_download_new(
+    entry: &crate::models::WatchlistEntry,
+    last: Option<&crate::models::WatchEntry>,
+) -> anyhow::Result<()> {
+    clearscreen_and_show_banner()?;
+    let mut animeku = AnimekuCli::for_provider(entry.provider_type);
+    if animeku.ensure_meta(&entry.movie).await.is_none() {
+        anyhow::bail!("gagal memuat daftar episode dari provider");
+    }
+
+    let movie = animeku
+        .current_movie()
+        .cloned()
+        .unwrap_or_else(|| entry.movie.clone());
+    let episodes = animeku.get_episode_list(&movie.id).unwrap_or_default();
+    if episodes.is_empty() {
+        anyhow::bail!("daftar episode kosong");
+    }
+
+    let new_episodes = episodes_after_last(&episodes, last);
+
+    if new_episodes.is_empty() {
+        println!(
+            "{} Tidak ada episode baru untuk '{}'.",
+            "✓".green(),
+            crate::models::clean_movie_title(&movie.title)
+        );
+        println!("\nTekan Enter untuk kembali...");
+        let mut dummy = String::new();
+        let _ = std::io::stdin().read_line(&mut dummy);
+        return Ok(());
+    }
+    println!(
+        "{} {} episode baru ditemukan ({} s/d {}).",
+        "◆".blue(),
+        new_episodes.len(),
+        crate::models::clean_episode_title(&new_episodes[0].title),
+        crate::models::clean_episode_title(&new_episodes[new_episodes.len() - 1].title)
+    );
+
+    let streams = animeku
+        .resolve_streams_for_episode(&new_episodes[0])
+        .await?;
+    let Some(stream) = input::choice("Pilih Kualitas untuk Batch:", streams, 0)? else {
+        return Ok(());
+    };
+    let Some(directory) = download::prompt_batch_directory()? else {
+        return Ok(());
+    };
+    let Some(existing) = download::prompt_existing_policy()? else {
+        return Ok(());
+    };
+
+    if !confirm_action(&format!(
+        "Download {} episode baru ke '{}'?",
+        new_episodes.len(),
+        directory.display()
+    ))? {
+        return Ok(());
+    }
+
+    let provider_type = animeku.provider_type();
+    let episode_count = episodes.len();
+    let mut queue = crate::batch::BatchQueue::new(
+        provider_type,
+        movie,
+        new_episodes,
+        stream.title,
+        directory,
+        existing,
+    );
+    queue.save()?;
+    animeku.run_batch(&mut queue).await?;
+    if queue.is_done() {
+        input::update_watchlist_episode_count(entry.provider_type, &entry.movie.id, episode_count);
+    }
+    Ok(())
+}
+
+async fn handle_check_new_episodes(
+    watchlist: &[crate::models::WatchlistEntry],
+) -> anyhow::Result<()> {
+    clearscreen_and_show_banner()?;
+    println!(
+        "Memeriksa episode baru untuk {} judul watchlist...\n",
+        watchlist.len()
+    );
+
+    let mut found = 0usize;
+    for entry in watchlist {
+        let title = crate::models::clean_movie_title(&entry.movie.title);
+        print!("  {} ... ", title);
+        stdout().flush().unwrap_or(());
+
+        let mut animeku = AnimekuCli::for_provider(entry.provider_type);
+        if animeku.ensure_meta(&entry.movie).await.is_none() {
+            println!("gagal memuat daftar episode");
+            continue;
+        }
+
+        let movie = animeku
+            .current_movie()
+            .cloned()
+            .unwrap_or_else(|| entry.movie.clone());
+        let episodes = animeku.get_episode_list(&movie.id).unwrap_or_default();
+        if episodes.is_empty() {
+            println!("daftar episode kosong");
+            continue;
+        }
+
+        let count = episodes.len();
+        match entry.known_episode_count {
+            Some(previous) if count > previous => {
+                println!(
+                    "{} episode baru!",
+                    (count - previous).to_string().green()
+                );
+                found += 1;
+            }
+            Some(previous) if count < previous => {
+                println!("daftar berubah ({} -> {} episode)", previous, count);
+            }
+            Some(_) => println!("tidak ada episode baru"),
+            None => println!("{} episode (baseline disimpan)", count),
+        }
+        input::update_watchlist_episode_count(entry.provider_type, &entry.movie.id, count);
+    }
+
+    println!("\nSelesai. {} judul punya episode baru.", found);
+    println!("\nTekan Enter untuk kembali...");
+    let mut dummy = String::new();
+    let _ = std::io::stdin().read_line(&mut dummy);
+    Ok(())
 }
 
 async fn handle_watchlist(discord: &mut Option<DiscordIpcClient>) -> anyhow::Result<()> {
@@ -2004,6 +2436,7 @@ async fn handle_watchlist(discord: &mut Option<DiscordIpcClient>) -> anyhow::Res
         entries.push(input::MenuEntry::separator(
             "─── Aksi ─────────────────────────────────────",
         ));
+        entries.push(input::MenuEntry::new("Cek Episode Baru"));
         entries.push(input::MenuEntry::new("Hapus Semua Watchlist"));
         entries.push(input::MenuEntry::new("Kembali"));
 
@@ -2011,12 +2444,16 @@ async fn handle_watchlist(discord: &mut Option<DiscordIpcClient>) -> anyhow::Res
             break;
         };
         if choice == separator_index + 1 {
+            handle_check_new_episodes(&watchlist).await?;
+            continue;
+        }
+        if choice == separator_index + 2 {
             if confirm_action("Hapus semua watchlist?")? {
                 input::clear_watchlist();
             }
             continue;
         }
-        if choice == separator_index + 2 || choice >= watchlist.len() {
+        if choice == separator_index + 3 || choice >= watchlist.len() {
             break;
         }
 
@@ -2056,6 +2493,10 @@ async fn handle_watchlist(discord: &mut Option<DiscordIpcClient>) -> anyhow::Res
             });
             actions.push(WatchlistAction::Resume);
         }
+        labels.push("Download Episode Baru".to_string());
+        actions.push(WatchlistAction::DownloadNewEpisodes);
+        labels.push("Info AniList".to_string());
+        actions.push(WatchlistAction::InfoAniList);
         labels.push("Hapus dari Watchlist".to_string());
         actions.push(WatchlistAction::Remove);
         labels.push("Kembali".to_string());
@@ -2080,6 +2521,17 @@ async fn handle_watchlist(discord: &mut Option<DiscordIpcClient>) -> anyhow::Res
             WatchlistAction::OpenEpisodes => {
                 let mut animeku = AnimekuCli::for_provider(entry.provider_type);
                 handle_movie_episodes(&mut animeku, &entry.movie, discord).await?;
+                let movie = animeku
+                    .current_movie()
+                    .cloned()
+                    .unwrap_or_else(|| entry.movie.clone());
+                if let Some(episodes) = animeku.get_episode_list(&movie.id) {
+                    input::update_watchlist_episode_count(
+                        entry.provider_type,
+                        &entry.movie.id,
+                        episodes.len(),
+                    );
+                }
             }
             WatchlistAction::Resume => {
                 if let Some(last) = last {
@@ -2090,6 +2542,34 @@ async fn handle_watchlist(discord: &mut Option<DiscordIpcClient>) -> anyhow::Res
                     };
                     resume_watch_entry(discord, &last, start_seconds).await?;
                 }
+            }
+            WatchlistAction::DownloadNewEpisodes => {
+                if let Err(error) = handle_watchlist_download_new(&entry, last.as_ref()).await {
+                    eprintln!("{} {:#}", "■".red(), error);
+                    println!();
+                    println!("Tekan Enter untuk kembali...");
+                    let mut dummy = String::new();
+                    let _ = std::io::stdin().read_line(&mut dummy);
+                }
+            }
+            WatchlistAction::InfoAniList => {
+                clearscreen_and_show_banner()?;
+                let title = crate::models::clean_movie_title(&entry.movie.title);
+                match crate::anilist::search(&title).await {
+                    Ok(Some(info)) => {
+                        if let Some(cover) = &info.cover_url {
+                            crate::util::show_image_thumb(cover.clone()).await;
+                        }
+                        println!("{}", crate::anilist::format_info(&info));
+                    }
+                    Ok(None) => println!("Tidak ditemukan di AniList."),
+                    Err(error) => {
+                        eprintln!("{} Gagal memuat info AniList: {:#}", "■".red(), error)
+                    }
+                }
+                println!("\nTekan Enter untuk kembali...");
+                let mut dummy = String::new();
+                let _ = std::io::stdin().read_line(&mut dummy);
             }
             WatchlistAction::Remove => {
                 let title = crate::models::clean_movie_title(&entry.movie.title);
@@ -2108,6 +2588,14 @@ async fn handle_watchlist(discord: &mut Option<DiscordIpcClient>) -> anyhow::Res
 
 async fn run_app() -> anyhow::Result<()> {
     crate::util::cleanup_temp_files();
+    crate::update::cleanup_old_binary();
+
+    if cli_check_update() {
+        return handle_check_update().await;
+    }
+    if cli_update() {
+        return handle_self_update(false).await;
+    }
 
     let config = config::Config::load();
     let mut discord = if config.rpc && !rpc_disabled() {
@@ -2152,8 +2640,14 @@ async fn run_app() -> anyhow::Result<()> {
             MainAction::Continue => {
                 handle_resume_latest(&mut discord).await?;
             }
+            MainAction::Batch => {
+                handle_resume_batch().await?;
+            }
             MainAction::Search => {
                 handle_search_and_watch(&mut discord).await?;
+            }
+            MainAction::Explore => {
+                handle_explore(&mut discord).await?;
             }
             MainAction::Watchlist => {
                 handle_watchlist(&mut discord).await?;
@@ -2168,7 +2662,7 @@ async fn run_app() -> anyhow::Result<()> {
                 let _ = show_health_screen()?;
             }
             MainAction::Update => {
-                handle_self_update()?;
+                handle_self_update(true).await?;
             }
             MainAction::Exit => {
                 crate::util::cleanup_temp_files();
@@ -2204,6 +2698,51 @@ mod main_tests {
     fn test_check_command_exists() {
         assert!(check_command_exists("cargo"));
         assert!(!check_command_exists("nonexistent_random_command_12345"));
+    }
+
+    #[test]
+    fn watchlist_new_episodes_handles_both_provider_orders() {
+        let episode = |id: &str, title: &str| crate::models::Episode {
+            id: id.into(),
+            title: title.into(),
+            is_series: true,
+        };
+        let last = crate::models::WatchEntry {
+            episode: episode("2", "Episode 2"),
+            ..Default::default()
+        };
+
+        let oldest_first = vec![
+            episode("1", "Episode 1"),
+            episode("2", "Episode 2"),
+            episode("3", "Episode 3"),
+        ];
+        assert_eq!(
+            episodes_after_last(&oldest_first, Some(&last))
+                .iter()
+                .map(|episode| episode.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["3"]
+        );
+
+        let newest_first = vec![
+            episode("3", "Episode 3"),
+            episode("2", "Episode 2"),
+            episode("1", "Episode 1"),
+        ];
+        assert_eq!(
+            episodes_after_last(&newest_first, Some(&last))
+                .iter()
+                .map(|episode| episode.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["3"]
+        );
+
+        let last_newest = crate::models::WatchEntry {
+            episode: episode("3", "Episode 3"),
+            ..Default::default()
+        };
+        assert!(episodes_after_last(&newest_first, Some(&last_newest)).is_empty());
     }
 
     #[test]
