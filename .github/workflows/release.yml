@@ -105,7 +105,10 @@ jobs:
         if: matrix.cross
         shell: bash
         run: |
-          cross run --release --locked --target ${{ matrix.target }} -- --version
+          image="$(docker images --format '{{.Repository}}:{{.Tag}}' | grep 'aarch64-unknown-linux-gnu' | head -n1)"
+          test -n "$image"
+          docker run --rm -v "$PWD/dist:/dist:ro" "$image" \
+            /linux-runner aarch64 "/dist/${{ matrix.asset }}" --version
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
