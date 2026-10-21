@@ -99,6 +99,9 @@ pub struct Config {
     pub rpc: bool,
     pub compact_banner: bool,
     pub show_posters: bool,
+    /// Last folder used for episode downloads. `None` means use the platform
+    /// Downloads directory with an `Animeku-CLI` subfolder.
+    pub download_dir: Option<String>,
 }
 
 impl Default for Config {
@@ -111,6 +114,7 @@ impl Default for Config {
             rpc: true,
             compact_banner: false,
             show_posters: true,
+            download_dir: None,
         }
     }
 }
@@ -179,6 +183,7 @@ mod tests {
             rpc: false,
             compact_banner: true,
             show_posters: false,
+            download_dir: Some("/tmp/animeku".to_string()),
         };
         let encoded = serde_json::to_string(&config).unwrap();
         let decoded: Config = serde_json::from_str(&encoded).unwrap();
@@ -189,5 +194,6 @@ mod tests {
         assert!(!decoded.rpc);
         assert!(decoded.compact_banner);
         assert!(!decoded.show_posters);
+        assert_eq!(decoded.download_dir.as_deref(), Some("/tmp/animeku"));
     }
 }

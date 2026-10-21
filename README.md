@@ -14,14 +14,15 @@ https://github.com/user-attachments/assets/5d029903-ba1f-46c4-ab72-f021d8500a7c
 
 ### Instalasi
 > [!NOTE]
-> Pastikan kamu sudah menginstall Rust dan pemutar media (**mpv** sangat disarankan), jika belum silakan klik [tautan berikut](https://rustup.rs/).
-> 
-> - **Windows**: Install MPV dengan mudah melalui terminal (PowerShell / CMD):
+> Pastikan kamu sudah menginstall Rust dan pemutar media (**mpv** sangat disarankan). Fitur **download episode** juga membutuhkan **ffmpeg**. Jika Rust belum ada, silakan klik [tautan berikut](https://rustup.rs/).
+>
+> - **Windows**: Install MPV dan ffmpeg melalui terminal (PowerShell / CMD):
 >   ```powershell
 >   winget install --id shinchiro.mpv
+>   winget install --id Gyan.FFmpeg
 >   ```
-> - **Linux**: `sudo apt install mpv` (Ubuntu/Debian) atau `sudo pacman -S mpv` (Arch).
-> - **Android (Termux)**: `pkg install rust mpv`.
+> - **Linux**: `sudo apt install mpv ffmpeg` (Ubuntu/Debian) atau `sudo pacman -S mpv ffmpeg` (Arch).
+> - **Android (Termux)**: `pkg install rust mpv ffmpeg`.
 
 #### Auto Install (Windows — satu baris)
 
@@ -39,7 +40,7 @@ Buka terminal lalu jalankan:
 curl -sL https://raw.githubusercontent.com/yuutaa7x/animeku-cli/refs/heads/main/install.sh | bash
 ```
 
-Script akan otomatis menginstall Rust dan MPV jika belum ada, lalu build dan install animeku-cli.
+Script akan otomatis menginstall Rust, MPV, dan ffmpeg jika belum ada, lalu build dan install animeku-cli.
 
 #### Auto Install (Android / Termux — satu baris)
 
@@ -49,7 +50,7 @@ Buka aplikasi Termux lalu jalankan script dibawah ini untuk auto-install:
 curl -sL https://raw.githubusercontent.com/yuutaa7x/animeku-cli/refs/heads/main/install_termux.sh | bash
 ```
 
-Tunggu instalasi selesai, dan jangan lupa download VLC for Android di Play Store terlebih dahulu sebelum menginstall/sebelum nonton
+Tunggu instalasi selesai, lalu install VLC for Android dari Play Store sebelum menonton. Script juga menyertakan ffmpeg untuk fitur download episode.
 
 #### Manual Install (semua platform)
 
@@ -88,12 +89,14 @@ cargo uninstall animeku-cli
 - Menonton Anime, Live Action, Film, dan TV Series secara gratis tanpa iklan.
 - Hasil pencarian lengkap dengan pilihan server & resolusi (1080p, 720p, 480p, 360p).
 - Otomatis memuat Subtitle Indonesia langsung ke player.
+- Download episode dengan pilihan kualitas/server, progress bar, nama file kustom, dan folder tujuan.
+- Subtitle `.vtt` ikut disimpan di samping video hasil download. Default container: `.mkv` untuk HLS Idlix dan `.mp4` untuk direct Otakudesu.
 - Terintegrasi dengan Discord Rich Presence (RPC).
 - Fitur Riwayat Tontonan multi-entry (menyimpan histori judul & episode yang ditonton).
 - Fitur Riwayat Pencarian (suggestion otomatis saat mengetik).
 - Resume Otomatis (melanjutkan episode dari menit/detik terakhir yang ditonton).
 - Auto-Next Episode setelah selesai memutar.
-- Pengaturan persisten: player default, auto-next, provider, Discord RPC, banner compact, dan poster episode.
+- Pengaturan persisten: player default, auto-next, provider, Discord RPC, banner compact, poster episode, dan folder download.
 - Dukungan CLI flags untuk pencarian langsung, resume, pemilihan provider/player, dan menonaktifkan RPC.
 - Pengecekan dependensi dan Check Health sistem yang interaktif.
 - Retry otomatis dan fallback Idlix ↔ Otakudesu saat provider error atau tidak mengembalikan hasil.
@@ -101,6 +104,17 @@ cargo uninstall animeku-cli
 - Watchlist untuk menyimpan judul, lalu langsung memilih episode atau melanjutkan tontonan terakhir dari menu utama.
 
 ### Changelog
+
+#### v0.3.5 — Download episode dengan ffmpeg (21 Oktober 2026)
+
+- Aksi baru `[ ⬇ Download Episode Ini ]` di pemilih server/kualitas. Setelah itu muncul pemilih kualitas/server terpisah sebelum download dimulai.
+- Folder tujuan dan nama file ditanyakan setiap download. Folder terakhir diingat sebagai default dan bisa diubah lewat **Pengaturan → Folder download**.
+- Progress download menampilkan persentase, ukuran file, dan kecepatan. Hasil ditulis ke file `.part` lalu di-rename setelah ffmpeg selesai, sehingga file setengah jadi tidak dianggap sebagai video final.
+- Idlix desktop: playlist HLS video dan audio terpisah digabung menjadi satu file. Idlix Android: master playlist yang sudah berisi audio dipakai langsung. Otakudesu: URL MP4/Google Video diunduh dengan `Referer` dan user agent yang sesuai.
+- Subtitle Idlix disalin sebagai file `.vtt` sidecar dengan nama yang sama seperti video.
+- Default folder: `~/Downloads/Animeku-CLI` (Android: `/sdcard/Download/Animeku-CLI`). Default format: `.mkv` untuk Idlix, `.mp4` untuk Otakudesu.
+- Membutuhkan `ffmpeg`. Check Health sekarang menampilkan status ffmpeg, dan auto-install dependensi ikut memasang ffmpeg.
+- Perbaikan cache stream Idlix: playlist lokal selalu diambil ulang agar tidak memutar atau mengunduh episode yang salah setelah berpindah episode.
 
 #### v0.3.4 — Watchlist (21 Oktober 2026)
 
@@ -160,7 +174,7 @@ Rilis ini fokus pada kenyamanan navigasi, riwayat, dan kontrol dari terminal.
 - Aksi "Pilih Episode Lain" langsung dari detail riwayat.
 - Provider pilihan per judul diingat, begitu juga hasil deteksi AniList, sehingga pencarian berulang tidak melakukan deteksi dari awal.
 - Override provider lewat config, CLI, atau aksi "Ganti Provider & Cari".
-- Menu Pengaturan untuk player default, auto-next, provider, Discord RPC, banner compact, poster episode, hapus riwayat, hapus watchlist, dan hapus cache metadata/provider.
+- Menu Pengaturan untuk player default, auto-next, provider, Discord RPC, banner compact, poster episode, folder download, hapus riwayat, hapus watchlist, dan hapus cache metadata/provider.
 - Config disimpan sebagai JSON di `dirs::config_dir()/animeku-cli/config.json` (Linux biasanya `~/.config/animeku-cli/config.json`).
 
 ##### Tampilan & Error Handling

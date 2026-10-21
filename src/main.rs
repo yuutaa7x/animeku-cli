@@ -12,6 +12,7 @@ use crate::{input::{get_user_input, load_history, save_history, pick_provider, l
 mod animeku;
 mod cache;
 mod config;
+mod download;
 mod episode;
 mod ext;
 mod input;
@@ -364,39 +365,39 @@ fn install_dependencies(package_manager: &str) {
     match package_manager {
         "apt-get" => {
             let _ = Command::new("sudo")
-                .args(["apt-get", "install", "-y", "mpv", "yt-dlp"])
+                .args(["apt-get", "install", "-y", "mpv", "yt-dlp", "ffmpeg"])
                 .status();
         },
         "pacman" => {
             let _ = Command::new("sudo")
-                .args(["pacman", "-S", "--noconfirm", "mpv", "yt-dlp"])
+                .args(["pacman", "-S", "--noconfirm", "mpv", "yt-dlp", "ffmpeg"])
                 .status();
         },
         "dnf" => {
             let _ = Command::new("sudo")
-                .args(["dnf", "install", "-y", "mpv", "yt-dlp"])
+                .args(["dnf", "install", "-y", "mpv", "yt-dlp", "ffmpeg"])
                 .status();
         },
         "zypper" => {
             let _ = Command::new("sudo")
-                .args(["zypper", "install", "-y", "mpv", "yt-dlp"])
+                .args(["zypper", "install", "-y", "mpv", "yt-dlp", "ffmpeg"])
                 .status();
         },
         "apk" => {
             let _ = Command::new("sudo")
-                .args(["apk", "add", "mpv", "yt-dlp"])
+                .args(["apk", "add", "mpv", "yt-dlp", "ffmpeg"])
                 .status();
         },
         "pkg" => {
             // Termux (Android) — tidak butuh sudo
-            println!("  {} Menjalankan: pkg install mpv yt-dlp ...", "ℹ".yellow());
+            println!("  {} Menjalankan: pkg install mpv yt-dlp ffmpeg ...", "ℹ".yellow());
             let _ = Command::new("pkg")
-                .args(["install", "-y", "mpv", "yt-dlp"])
+                .args(["install", "-y", "mpv", "yt-dlp", "ffmpeg"])
                 .status();
         },
         "brew" => {
             let _ = Command::new("brew")
-                .args(["install", "mpv", "yt-dlp"])
+                .args(["install", "mpv", "yt-dlp", "ffmpeg"])
                 .status();
         },
         "winget" => {
@@ -427,19 +428,24 @@ fn install_dependencies(package_manager: &str) {
             let _ = Command::new(&winget_bin)
                 .args(["install", "--id", "yt-dlp.yt-dlp", "-e", "--source", "winget", "--accept-source-agreements", "--accept-package-agreements"])
                 .status();
+
+            println!("  {} Menjalankan: winget install --id Gyan.FFmpeg --source winget ...", "ℹ".yellow());
+            let _ = Command::new(&winget_bin)
+                .args(["install", "--id", "Gyan.FFmpeg", "-e", "--source", "winget", "--accept-source-agreements", "--accept-package-agreements"])
+                .status();
         },
         "choco" => {
             let choco_bin = resolve_command_path("choco");
-            println!("  {} Menjalankan: choco install -y mpv yt-dlp ...", "ℹ".yellow());
+            println!("  {} Menjalankan: choco install -y mpv yt-dlp ffmpeg ...", "ℹ".yellow());
             let _ = Command::new(&choco_bin)
-                .args(["install", "-y", "mpv", "yt-dlp"])
+                .args(["install", "-y", "mpv", "yt-dlp", "ffmpeg"])
                 .status();
         },
         "scoop" => {
             let scoop_bin = resolve_command_path("scoop");
-            println!("  {} Menjalankan: scoop install mpv yt-dlp ...", "ℹ".yellow());
+            println!("  {} Menjalankan: scoop install mpv yt-dlp ffmpeg ...", "ℹ".yellow());
             let _ = Command::new(&scoop_bin)
-                .args(["install", "mpv", "yt-dlp"])
+                .args(["install", "mpv", "yt-dlp", "ffmpeg"])
                 .status();
         },
         _ => {},
@@ -491,7 +497,20 @@ fn show_health_screen() -> anyhow::Result<bool> {
             println!("    {} {}", "↳".bright_black(), "Fallback extraction disabled".bright_black());
         }
         println!();
-        
+
+        let has_ffmpeg = check_command_exists("ffmpeg");
+        if has_ffmpeg {
+            println!("  {}  ffmpeg (Episode Download)", "[✓ INSTALLED]".bright_green());
+        } else {
+            println!("  {}  ffmpeg (Episode Download)", "[- OPTIONAL ]".bright_yellow());
+            println!(
+                "    {} {}",
+                "↳".bright_black(),
+                "Episode download disabled (ffmpeg missing)".bright_black()
+            );
+        }
+        println!();
+
         println!("  {}  Native Rust Scraper (Idlix Animation)", "[✓ BUILT-IN ]".bright_cyan());
         println!();
         
@@ -499,13 +518,17 @@ fn show_health_screen() -> anyhow::Result<bool> {
         println!("  {}", "Current Limitations:".bright_yellow());
         if !has_mpv {
             println!("  {} {}", "•".bright_yellow(), "Terminal playback is a NO GO (MPV missing)".bright_yellow());
-        } else {
+        }
+        if !has_ffmpeg {
+            println!("  {} {}", "•".bright_yellow(), "Episode download is a NO GO (ffmpeg missing)".bright_yellow());
+        }
+        if has_mpv && has_ffmpeg {
             println!("  {} {}", "•".bright_green(), "None. All systems nominal.".bright_green());
         }
         println!("  {}", "------------------------------------------------------------------".bright_white());
         println!();
         
-        println!("  {} {}", "[ 1 ]".bright_green(), "Auto-install dependencies (MPV + yt-dlp)".bright_green());
+        println!("  {} {}", "[ 1 ]".bright_green(), "Auto-install dependencies (MPV + ffmpeg + yt-dlp)".bright_green());
         if has_mpv {
             println!("  {} {}", "[ 2 ]".bright_white(), "Continue to Animeku-CLI (Watch Anime)".bright_white());
         } else {
@@ -537,13 +560,15 @@ fn show_health_screen() -> anyhow::Result<bool> {
                     println!("     {}", "scoop install mpv".cyan());
                     println!("  3. Atau unduh manual installer MPV di:");
                     println!("     {}", "https://mpv.io/installation/".cyan());
+                    println!("  4. Untuk download episode, install ffmpeg:");
+                    println!("     {}", "winget install --id Gyan.FFmpeg --source winget".cyan());
                     println!("\n  Ingin membuka halaman unduhan MPV di browser? (y/n)");
                     let mut answer = String::new();
                     if std::io::stdin().read_line(&mut answer).is_ok() && answer.trim().eq_ignore_ascii_case("y") {
                         let _ = open::that("https://mpv.io/installation/");
                     }
                 } else {
-                    println!("\n{} Package manager tidak terdeteksi! Silakan install mpv dan yt-dlp secara manual.", "■".red());
+                    println!("\n{} Package manager tidak terdeteksi! Silakan install mpv, yt-dlp, dan ffmpeg secara manual.", "■".red());
                 }
             } else {
                 install_dependencies(package_manager);
@@ -1381,6 +1406,27 @@ fn choose_auto_next_setting(config: &mut config::Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn choose_download_dir_setting(config: &mut config::Config) -> anyhow::Result<()> {
+    let current = download::default_download_dir();
+    let Ok(value) = dialoguer::Input::<String>::with_theme(&crate::util::custom_theme())
+        .with_prompt("Folder download (kosongkan untuk default)")
+        .with_initial_text(current.display().to_string())
+        .allow_empty(true)
+        .interact_text()
+    else {
+        return Ok(());
+    };
+
+    let value = value.trim();
+    if value.is_empty() {
+        config.download_dir = None;
+    } else {
+        config.download_dir = Some(value.to_string());
+    }
+    config.save();
+    Ok(())
+}
+
 fn choose_provider_setting(config: &mut config::Config) -> anyhow::Result<()> {
     let labels = ["Otomatis", "Idlix", "Otakudesu", "Kembali"];
     let entries = labels
@@ -1422,6 +1468,13 @@ async fn handle_settings_menu(discord: &mut Option<DiscordIpcClient>) -> anyhow:
             format!(
                 "Poster episode: {}",
                 if config.show_posters { "Aktif" } else { "Mati" }
+            ),
+            format!(
+                "Folder download: {}",
+                config
+                    .download_dir
+                    .as_deref()
+                    .unwrap_or("(default)")
             ),
             "Hapus riwayat pencarian".to_string(),
             "Hapus riwayat tontonan".to_string(),
@@ -1467,29 +1520,30 @@ async fn handle_settings_menu(discord: &mut Option<DiscordIpcClient>) -> anyhow:
                 config.show_posters = !config.show_posters;
                 config.save();
             }
-            6 => {
+            6 => choose_download_dir_setting(&mut config)?,
+            7 => {
                 if confirm_action("Hapus semua riwayat pencarian?")? {
                     input::clear_search_history();
                 }
             }
-            7 => {
+            8 => {
                 if confirm_action("Hapus semua riwayat tontonan?")? {
                     input::clear_watch_history();
                 }
             }
-            8 => {
+            9 => {
                 if confirm_action("Hapus semua watchlist?")? {
                     input::clear_watchlist();
                 }
             }
-            9 => {
+            10 => {
                 if confirm_action("Hapus cache metadata, deteksi, dan pilihan provider?")? {
                     crate::cache::clear();
                     input::clear_provider_detections();
                     input::clear_search_providers();
                 }
             }
-            10 => handle_self_update()?,
+            11 => handle_self_update()?,
             _ => break,
         }
     }

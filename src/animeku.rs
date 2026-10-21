@@ -892,8 +892,10 @@ impl AnimekuCli {
         self.current_episode = Some(fallback_episode.clone());
         self.episode_cache
             .insert(fallback_movie.id.clone(), (episodes, meta));
-        self.stream_cache
-            .insert(fallback_episode.id.clone(), streams.clone());
+        if to != crate::PROVIDER_IDLIX {
+            self.stream_cache
+                .insert(fallback_episode.id.clone(), streams.clone());
+        }
         notify_fallback_success(to);
         Some(streams)
     }
@@ -1286,8 +1288,17 @@ impl AnimekuCli {
         let id = episode.id.clone();
         let spinner_message = format!("Memuat server stream '{}'...", episode.title.trim());
 
-        let streams = if let Some(cached) = self.stream_cache.get(&id) {
-            cached.clone()
+        // Idlix writes each ready-to-play stream to a shared local playlist
+        // file. A cached entry would point at a file that a later episode
+        // overwrites, so always resolve Idlix streams fresh.
+        let cached = if self.provider_type == crate::PROVIDER_IDLIX {
+            None
+        } else {
+            self.stream_cache.get(&id).cloned()
+        };
+
+        let streams = if let Some(cached) = cached {
+            cached
         } else {
             let result = crate::util::with_spinner(
                 spinner_message,
@@ -1325,7 +1336,8 @@ impl AnimekuCli {
                 },
             };
 
-            if !streams.is_empty()
+            if self.provider_type != crate::PROVIDER_IDLIX
+                && !streams.is_empty()
                 && self
                     .current_episode
                     .as_ref()
@@ -1361,6 +1373,10 @@ impl AnimekuCli {
 
         loop {
             let mut opts = streams.clone();
+            opts.push(Stream {
+                url: "download".into(),
+                title: "[ ⬇ Download Episode Ini ]".into(),
+            });
             if active_movie.is_some() {
                 opts.push(Stream {
                     url: "watchlist".into(),
@@ -1379,6 +1395,46 @@ impl AnimekuCli {
             let Some(selected) = input::choice("Pilih Server / Kualitas:", opts, 0)? else {
                 return Ok(None);
             };
+
+            if selected.url == "download" {
+                if let Err(error) = crate::download::ensure_available() {
+                    eprintln!("{} {:#}", "■".red(), error);
+                    println!();
+                    println!("Tekan Enter untuk kembali...");
+                    let mut dummy = String::new();
+                    let _ = std::io::stdin().read_line(&mut dummy);
+                    continue;
+                }
+
+                let Some(download_stream) =
+                    input::choice("Pilih Kualitas untuk Diunduh:", streams.clone(), 0)?
+                else {
+                    continue;
+                };
+
+                let movie = self.current_movie.clone();
+                let episode = self.current_episode.clone();
+                let provider = self.provider_type;
+                if let (Some(movie), Some(episode)) = (movie, episode) {
+                    match crate::download::download_stream(
+                        provider,
+                        &download_stream,
+                        &movie,
+                        &episode,
+                    ) {
+                        Ok(crate::download::DownloadOutcome::Completed(_))
+                        | Ok(crate::download::DownloadOutcome::Cancelled) => {}
+                        Err(error) => {
+                            eprintln!("{} Download gagal: {:#}", "■".red(), error);
+                            println!();
+                            println!("Tekan Enter untuk kembali...");
+                            let mut dummy = String::new();
+                            let _ = std::io::stdin().read_line(&mut dummy);
+                        }
+                    }
+                }
+                continue;
+            }
 
             if selected.url == "watchlist" {
                 if let Some(movie) = &active_movie {

@@ -152,6 +152,19 @@ if %ERRORLEVEL% EQU 0 (
         )
     )
 
+    where ffmpeg >nul 2>&1
+    if !ERRORLEVEL! NEQ 0 (
+        echo.
+        echo [INFO] ffmpeg is not installed yet. Episode download requires it.
+        where winget >nul 2>&1
+        if !ERRORLEVEL! EQU 0 (
+            echo [INFO] Installing ffmpeg automatically via winget...
+            winget install --id Gyan.FFmpeg -e --source winget --accept-package-agreements --accept-source-agreements
+        ) else (
+            echo [INFO] Please install ffmpeg from https://ffmpeg.org/download.html
+        )
+    )
+
     echo.
     echo  =====================================================
     echo    SUCCESS! animeku-cli installed!

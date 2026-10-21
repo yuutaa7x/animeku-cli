@@ -9,18 +9,18 @@ echo ""
 
 # Check for Rust
 if ! command -v cargo &> /dev/null; then
-    echo "[1/3] Rust not found. Installing Rust..."
+    echo "[1/4] Rust not found. Installing Rust..."
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     source "$HOME/.cargo/env"
     echo "[OK] Rust installed."
 else
-    echo "[1/3] Rust already installed. Skipping."
+    echo "[1/4] Rust already installed. Skipping."
 fi
 echo ""
 
 # Check for MPV
 if ! command -v mpv &> /dev/null; then
-    echo "[2/3] mpv not found. Attempting to install..."
+    echo "[2/4] mpv not found. Attempting to install..."
     if command -v apt &> /dev/null; then
         sudo apt update && sudo apt install -y mpv
     elif command -v pacman &> /dev/null; then
@@ -37,12 +37,35 @@ if ! command -v mpv &> /dev/null; then
         echo "[WARNING] Could not automatically install mpv. Please install it manually from your package manager."
     fi
 else
-    echo "[2/3] mpv already installed. Skipping."
+    echo "[2/4] mpv already installed. Skipping."
+fi
+echo ""
+
+# Check for ffmpeg (needed for episode downloads)
+if ! command -v ffmpeg &> /dev/null; then
+    echo "[3/4] ffmpeg not found. Attempting to install..."
+    if command -v apt &> /dev/null; then
+        sudo apt update && sudo apt install -y ffmpeg
+    elif command -v pacman &> /dev/null; then
+        sudo pacman -S --noconfirm ffmpeg
+    elif command -v dnf &> /dev/null; then
+        sudo dnf install -y ffmpeg
+    elif command -v zypper &> /dev/null; then
+        sudo zypper install -y ffmpeg
+    elif command -v brew &> /dev/null; then
+        brew install ffmpeg
+    elif command -v pkg &> /dev/null && [ -n "$TERMUX_VERSION" ]; then
+        pkg install -y ffmpeg
+    else
+        echo "[WARNING] Could not automatically install ffmpeg. Download episode will stay disabled until it is installed."
+    fi
+else
+    echo "[3/4] ffmpeg already installed. Skipping."
 fi
 echo ""
 
 # Install animeku-cli
-echo "[3/3] Installing animeku-cli..."
+echo "[4/4] Installing animeku-cli..."
 cargo install --git https://github.com/yuutaa7x/animeku-cli
 
 if [ $? -eq 0 ]; then
