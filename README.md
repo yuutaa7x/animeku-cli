@@ -61,6 +61,22 @@ cargo install --git https://github.com/yuutaa7x/animeku-cli
 
 Silakan tunggu proses penginstallan selesai dan jika sudah, ketik `animeku-cli` untuk menjalankannya.
 
+#### Troubleshooting Windows: konflik `/mingw64`
+
+Jika installer berhenti di `GCC installation failed` dengan pesan `/mingw64 exists in filesystem`, jalankan perintah berikut dari **CMD**:
+
+```bat
+C:\msys64\usr\bin\bash.exe -lc "mkdir -p /tmp && pacman -S --needed --noconfirm --overwrite '/mingw64' --overwrite '/mingw64/*' mingw-w64-x86_64-gcc"
+```
+
+Jika masih gagal, refresh database MSYS2 lalu ulangi:
+
+```bat
+C:\msys64\usr\bin\bash.exe -lc "pacman -Syu --noconfirm"
+```
+
+Installer versi terbaru sudah mencoba langkah ini otomatis, termasuk memindahkan folder `C:\msys64\mingw64` ke `mingw64.bak` sebagai upaya terakhir.
+
 ### Uninstall
 
 #### Auto Uninstall (Windows — satu baris)

@@ -110,15 +110,34 @@ echo [OK] MSYS2 installed.
 :install_gcc
 echo.
 echo [3/4] Installing mingw-w64 GCC via pacman...
-C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm mingw-w64-x86_64-gcc"
+C:\msys64\usr\bin\bash.exe -lc "mkdir -p /tmp && pacman -S --needed --noconfirm --overwrite '/mingw64' --overwrite '/mingw64/*' mingw-w64-x86_64-gcc"
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] GCC install failed. Refreshing MSYS2 packages and retrying...
+    C:\msys64\usr\bin\bash.exe -lc "mkdir -p /tmp && pacman -Syu --noconfirm"
+    C:\msys64\usr\bin\bash.exe -lc "mkdir -p /tmp && pacman -S --needed --noconfirm --overwrite '/mingw64' --overwrite '/mingw64/*' mingw-w64-x86_64-gcc"
+)
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] Still failing. Moving the existing C:\msys64\mingw64 aside and retrying...
+    if exist "C:\msys64\mingw64.bak" rmdir /s /q "C:\msys64\mingw64.bak"
+    if exist "C:\msys64\mingw64" move "C:\msys64\mingw64" "C:\msys64\mingw64.bak"
+    C:\msys64\usr\bin\bash.exe -lc "mkdir -p /tmp && pacman -S --needed --noconfirm mingw-w64-x86_64-gcc"
+)
 if %ERRORLEVEL% NEQ 0 (
     echo [ERROR] GCC installation failed.
+    echo [INFO] Jalankan manual di MSYS2:
+    echo        pacman -Syu --noconfirm
+    echo        pacman -S --needed --noconfirm --overwrite '/mingw64' --overwrite '/mingw64/*' mingw-w64-x86_64-gcc
+    pause
+    exit /b 1
+)
+if not exist "C:\msys64\mingw64\bin\gcc.exe" (
+    echo [ERROR] GCC executable tidak ditemukan setelah instalasi.
     pause
     exit /b 1
 )
 
 :: Add mingw to PATH permanently (skip if already added)
-powershell -NoProfile -Command "$p=[Environment]::GetEnvironmentVariable('PATH','User'); if($p -notlike '*msys64*'){[Environment]::SetEnvironmentVariable('PATH',$p+';C:\msys64\mingw64\bin','User')}"
+powershell -NoProfile -Command "$p=[Environment]::GetEnvironmentVariable('PATH','User'); if($p -notlike '*msys64\mingw64\bin*'){[Environment]::SetEnvironmentVariable('PATH',$p+';C:\msys64\mingw64\bin','User')}"
 set "PATH=C:\msys64\mingw64\bin;%PATH%"
 echo [OK] GCC installed and added to PATH.
 echo.
