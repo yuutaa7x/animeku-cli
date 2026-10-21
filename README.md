@@ -96,8 +96,17 @@ cargo uninstall animeku-cli
 - Pengaturan persisten: player default, auto-next, provider, Discord RPC, banner compact, dan poster episode.
 - Dukungan CLI flags untuk pencarian langsung, resume, pemilihan provider/player, dan menonaktifkan RPC.
 - Pengecekan dependensi dan Check Health sistem yang interaktif.
+- Retry otomatis dan fallback Idlix ↔ Otakudesu saat provider error atau tidak mengembalikan hasil.
 
 ### Changelog
+
+#### v0.3.2 — Reliability: retry, timeout & fallback provider (21 Oktober 2026)
+
+- Pencarian, daftar episode, dan stream sekarang dicoba ulang hingga 3 kali dengan jeda singkat sebelum menyerah.
+- Timeout eksplisit untuk request Otakudesu (connect 10 detik, total 20 detik). Idlix tetap memakai timeout curl yang sudah ada.
+- Jika provider aktif gagal atau hasilnya kosong, animeku-cli otomatis mencoba provider satunya. Fallback mencocokkan judul dan nomor episode sebelum melanjutkan playback.
+- Provider yang baru dipakai ditampilkan di layar, termasuk alasan fallback. Auto-next, riwayat tontonan, dan Discord RPC memakai movie/episode/provider hasil fallback, bukan ID lama.
+- Cache stream tetap hanya di memori dan tidak pernah ditulis ke disk.
 
 #### v0.3.1 — Perbaikan status loading (21 Oktober 2026)
 
@@ -149,7 +158,7 @@ animeku-cli --no-rpc
 animeku-cli "Judul Anime"
 ```
 - `--search <JUDUL>`: langsung cari tanpa membuka menu utama.
-- `--provider <auto|idlix|otakudesu>`: pilih provider untuk sesi ini.
+- `--provider <auto|idlix|otakudesu>`: pilih provider yang dicoba lebih dulu. Jika provider tersebut error atau tidak menemukan hasil, fallback otomatis ke provider satunya.
 - `--player <ask|mpv|vlc|browser>`: pilih pemutar untuk sesi ini.
 - `--resume`: lanjutkan tontonan terakhir.
 - `--no-rpc`: matikan Discord Rich Presence untuk sesi ini.

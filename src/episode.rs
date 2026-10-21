@@ -152,9 +152,18 @@ fn extract_ep_num(title: &str) -> u32 {
     last_num
 }
 
+/// Episode number exposed for provider fallback matching.
+pub fn episode_number(title: &str) -> Option<u32> {
+    if let Some((_, episode)) = parse_season_episode(title) {
+        return Some(episode);
+    }
+    let number = extract_ep_num(title);
+    (number > 0).then_some(number)
+}
+
 /// Parse season and episode numbers from common provider title formats:
 /// `S1E01`, `S01E01`, `Season 2 Episode 5`, `Season 2 Ep 5`.
-fn parse_season_episode(title: &str) -> Option<(u32, u32)> {
+pub fn parse_season_episode(title: &str) -> Option<(u32, u32)> {
     let sxe = Regex::new(r"(?i)\bS(\d{1,2})\s*E(\d{1,4})\b").unwrap();
     if let Some(caps) = sxe.captures(title) {
         if let (Ok(season), Ok(episode)) = (caps[1].parse(), caps[2].parse()) {
@@ -226,6 +235,13 @@ mod tests {
         );
         assert_eq!(parse_season_episode("Episode 5"), None);
         assert_eq!(parse_season_episode("Takopii no Genzai Episode 1"), None);
+    }
+
+    #[test]
+    fn test_episode_number_for_fallback_matching() {
+        assert_eq!(episode_number("S1E01 - To You in 2016"), Some(1));
+        assert_eq!(episode_number("Episode 12"), Some(12));
+        assert_eq!(episode_number("Full Movie"), None);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use base64::prelude::*;
 use std::collections::HashMap;
+use std::time::Duration;
 use async_trait::async_trait;
 use reqwest::Client;
 use scraper::{Html, Selector};
@@ -32,6 +33,8 @@ impl Otakudesu {
         Self {
             client: Client::builder()
                 .user_agent(OTAKUDESU_USER_AGENT)
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(20))
                 .build()
                 .unwrap(),
             base_url: otakudesu_base_url(),

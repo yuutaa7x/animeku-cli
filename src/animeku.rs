@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use colored::Colorize;
 
 use crate::{
-    ext::Ext,
+    ext::{self, Ext},
     input,
     models::{Episode, Meta, Movie, Stream},
     util::show_image_thumb,
@@ -15,10 +15,212 @@ pub struct AnimekuCli {
     episode_cache: HashMap<String, (Vec<Episode>, Meta)>,
     stream_cache: HashMap<String, Vec<Stream>>,
     extractor: Box<dyn Ext>,
+    provider_type: usize,
+    fallback_enabled: bool,
+    current_movie: Option<Movie>,
+    current_episode: Option<Episode>,
 }
 
 const SEARCH_SEPARATOR: &str = "────────────────────────";
 const EPISODES_PER_PAGE: usize = 25;
+const PROVIDER_ATTEMPTS: usize = 3;
+
+/// Retry transient provider failures before giving up or switching providers.
+/// A short backoff keeps the UI responsive while still smoothing over momentary
+/// network hiccups.
+async fn retry_search(
+    extractor: &mut dyn Ext,
+    title: &str,
+    page: usize,
+) -> anyhow::Result<(Vec<Movie>, u64)> {
+    let mut last_error = None;
+    for attempt in 0..PROVIDER_ATTEMPTS {
+        match extractor.search(title.to_string(), page).await {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt + 1 < PROVIDER_ATTEMPTS {
+                    let delay = 250u64 * (1u64 << attempt);
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("permintaan provider gagal")))
+}
+
+async fn retry_episodes(
+    extractor: &dyn Ext,
+    movie: &Movie,
+) -> anyhow::Result<(Vec<Episode>, Meta)> {
+    let mut last_error = None;
+    for attempt in 0..PROVIDER_ATTEMPTS {
+        match extractor.get_episodes(movie.clone()).await {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt + 1 < PROVIDER_ATTEMPTS {
+                    let delay = 250u64 * (1u64 << attempt);
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("permintaan provider gagal")))
+}
+
+async fn retry_streams(
+    extractor: &dyn Ext,
+    episode: &Episode,
+) -> anyhow::Result<Vec<Stream>> {
+    let mut last_error = None;
+    for attempt in 0..PROVIDER_ATTEMPTS {
+        match extractor.get_stream_urls(episode.clone()).await {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt + 1 < PROVIDER_ATTEMPTS {
+                    let delay = 250u64 * (1u64 << attempt);
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("permintaan provider gagal")))
+}
+
+fn alternate_provider(provider_type: usize) -> usize {
+    match provider_type {
+        ext::PROVIDER_OTAKUDESU => ext::PROVIDER_IDLIX,
+        _ => ext::PROVIDER_OTAKUDESU,
+    }
+}
+
+/// Idlix prefixes titles with `[Movie]`/`[Series]`; Otakudesu adds episode
+/// ranges and "Subtitle Indonesia". Normalise both before comparing results
+/// across providers.
+fn fallback_movie_title(movie: &Movie) -> String {
+    let raw = movie.title.trim();
+    let without_tag = raw
+        .strip_prefix("[Movie]")
+        .or_else(|| raw.strip_prefix("[Series]"))
+        .unwrap_or(raw)
+        .trim_start();
+    let cleaned = crate::models::clean_movie_title(without_tag);
+    if cleaned.is_empty() {
+        without_tag.to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn normalize_title_text(title: &str) -> String {
+    title
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn best_movie_match(target: &Movie, candidates: &[Movie]) -> Option<Movie> {
+    let target_norm = normalize_title_text(&fallback_movie_title(target));
+    if target_norm.is_empty() {
+        return None;
+    }
+
+    if let Some(movie) = candidates
+        .iter()
+        .find(|movie| normalize_title_text(&fallback_movie_title(movie)) == target_norm)
+    {
+        return Some(movie.clone());
+    }
+
+    let mut partial = candidates
+        .iter()
+        .filter(|movie| {
+            let candidate = normalize_title_text(&fallback_movie_title(movie));
+            !candidate.is_empty()
+                && (candidate.contains(&target_norm) || target_norm.contains(&candidate))
+        })
+        .collect::<Vec<_>>();
+    partial.sort_by_key(|movie| {
+        normalize_title_text(&fallback_movie_title(movie))
+            .len()
+            .abs_diff(target_norm.len())
+    });
+    partial.first().map(|movie| (*movie).clone())
+}
+
+fn normalized_episode_title(title: &str) -> String {
+    normalize_title_text(&crate::models::clean_episode_title(title))
+}
+
+fn best_episode_match(target: &Episode, candidates: &[Episode]) -> Option<Episode> {
+    let target_norm = normalized_episode_title(&target.title);
+    if !target_norm.is_empty() {
+        if let Some(episode) = candidates
+            .iter()
+            .find(|episode| normalized_episode_title(&episode.title) == target_norm)
+        {
+            return Some(episode.clone());
+        }
+    }
+
+    if let Some((season, number)) = crate::episode::parse_season_episode(&target.title) {
+        if let Some(episode) = candidates.iter().find(|episode| {
+            matches!(
+                crate::episode::parse_season_episode(&episode.title),
+                Some((candidate_season, candidate_number))
+                    if candidate_season == season && candidate_number == number
+            )
+        }) {
+            return Some(episode.clone());
+        }
+    }
+
+    if let Some(number) = crate::episode::episode_number(&target.title) {
+        if let Some(episode) = candidates
+            .iter()
+            .find(|episode| crate::episode::episode_number(&episode.title) == Some(number))
+        {
+            return Some(episode.clone());
+        }
+    }
+
+    if !target.is_series {
+        return candidates
+            .iter()
+            .find(|episode| !episode.is_series)
+            .cloned();
+    }
+
+    if candidates.len() == 1 {
+        return candidates.first().cloned();
+    }
+
+    None
+}
+
+fn notify_fallback(from: usize, to: usize, reason: &str) {
+    eprintln!(
+        "{} {} gagal: {}",
+        "⚠".yellow(),
+        ext::provider_name(from),
+        reason.trim()
+    );
+    eprintln!("{} Mencoba {}...", "◆".cyan(), ext::provider_name(to));
+}
+
+fn notify_fallback_success(to: usize) {
+    eprintln!(
+        "{} Beralih ke {}",
+        "✓".green(),
+        ext::provider_name(to).green()
+    );
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SearchAction {
@@ -255,8 +457,16 @@ impl AnimekuCli {
     /// Load and cache movie metadata without showing the episode picker.
     /// Used when resuming from history, where only the stored IDs are available.
     pub async fn ensure_meta(&mut self, movie: &Movie) -> Option<Meta> {
+        self.current_movie = Some(movie.clone());
+        self.current_episode = None;
         if !self.episode_cache.contains_key(&movie.id) {
-            let episodes_and_meta = self.extractor.get_episodes(movie.clone()).await.ok()?;
+            let message = format!("Memuat metadata '{}'...", movie.title.trim());
+            let episodes_and_meta = crate::util::with_spinner(
+                message,
+                retry_episodes(self.extractor.as_ref(), movie),
+            )
+            .await
+            .ok()?;
             self.episode_cache
                 .insert(movie.id.clone(), episodes_and_meta);
         }
@@ -267,13 +477,297 @@ impl AnimekuCli {
         self.episode_cache.get(id).map(|(e, _)| e.clone())
     }
 
+    /// Constructor for tests and other callers that supply their own extractor.
+    /// Automatic provider fallback is disabled here so an empty stub result
+    /// cannot accidentally hit the network.
+    #[cfg(test)]
     pub fn new(extractor: Box<dyn Ext>) -> Self {
+        Self::build(extractor, ext::PROVIDER_IDLIX, false)
+    }
+
+    /// Production constructor: the provider is known, and if it fails or returns
+    /// no data the matching provider on the other side is tried automatically.
+    pub fn for_provider(provider_type: usize) -> Self {
+        Self::build(
+            ext::make_extractor(provider_type),
+            provider_type,
+            true,
+        )
+    }
+
+    fn build(extractor: Box<dyn Ext>, provider_type: usize, fallback_enabled: bool) -> Self {
+        let provider_type = if provider_type == ext::PROVIDER_OTAKUDESU {
+            ext::PROVIDER_OTAKUDESU
+        } else {
+            ext::PROVIDER_IDLIX
+        };
         Self {
             movie_cache: HashMap::new(),
             episode_cache: HashMap::new(),
             stream_cache: HashMap::new(),
             extractor,
+            provider_type,
+            fallback_enabled,
+            current_movie: None,
+            current_episode: None,
         }
+    }
+
+    pub fn provider_type(&self) -> usize {
+        self.provider_type
+    }
+
+    pub fn current_movie(&self) -> Option<&Movie> {
+        self.current_movie.as_ref()
+    }
+
+    pub fn current_episode(&self) -> Option<&Episode> {
+        self.current_episode.as_ref()
+    }
+
+    fn switch_provider(&mut self, provider_type: usize) {
+        self.provider_type = provider_type;
+        self.extractor = ext::make_extractor(provider_type);
+        // IDs and cached pages are provider-specific. Keeping them would make
+        // an episode from one site look valid on the other.
+        self.movie_cache.clear();
+        self.episode_cache.clear();
+        self.stream_cache.clear();
+        self.current_movie = None;
+        self.current_episode = None;
+    }
+
+    async fn try_search_fallback(
+        &mut self,
+        title: &str,
+        reason: &str,
+    ) -> Option<(Vec<Movie>, u64)> {
+        if !self.fallback_enabled {
+            return None;
+        }
+        let from = self.provider_type;
+        let to = alternate_provider(from);
+        notify_fallback(from, to, reason);
+
+        let mut extractor = ext::make_extractor(to);
+        match retry_search(extractor.as_mut(), title, 1).await {
+            Ok((movies, total_pages)) if !movies.is_empty() => {
+                self.switch_provider(to);
+                notify_fallback_success(to);
+                Some((movies, total_pages))
+            }
+            Ok(_) => {
+                eprintln!(
+                    "{} {} juga tidak menemukan hasil.",
+                    "■".red(),
+                    ext::provider_name(to)
+                );
+                None
+            }
+            Err(error) => {
+                eprintln!(
+                    "{} {} juga gagal: {:#}",
+                    "■".red(),
+                    ext::provider_name(to),
+                    error
+                );
+                None
+            }
+        }
+    }
+
+    async fn try_fallback_episodes(
+        &mut self,
+        movie: &Movie,
+        reason: &str,
+    ) -> Option<(Vec<Episode>, Meta)> {
+        if !self.fallback_enabled {
+            return None;
+        }
+        let from = self.provider_type;
+        let to = alternate_provider(from);
+        notify_fallback(from, to, reason);
+
+        let title = fallback_movie_title(movie);
+        if title.is_empty() {
+            return None;
+        }
+
+        let mut extractor = ext::make_extractor(to);
+        let candidates = match retry_search(extractor.as_mut(), &title, 1).await {
+            Ok((movies, _)) if !movies.is_empty() => movies,
+            Ok(_) => {
+                eprintln!(
+                    "{} {} juga tidak menemukan judul yang cocok.",
+                    "■".red(),
+                    ext::provider_name(to)
+                );
+                return None;
+            }
+            Err(error) => {
+                eprintln!(
+                    "{} {} juga gagal mencari judul: {:#}",
+                    "■".red(),
+                    ext::provider_name(to),
+                    error
+                );
+                return None;
+            }
+        };
+
+        let Some(fallback_movie) = best_movie_match(movie, &candidates) else {
+            eprintln!(
+                "{} {} tidak menemukan judul yang cocok untuk '{}'.",
+                "■".red(),
+                ext::provider_name(to),
+                title
+            );
+            return None;
+        };
+
+        let (episodes, meta) =
+            match retry_episodes(extractor.as_ref(), &fallback_movie).await {
+                Ok(item) if !item.0.is_empty() => item,
+                Ok(_) => {
+                    eprintln!(
+                        "{} {} juga tidak memiliki daftar episode.",
+                        "■".red(),
+                        ext::provider_name(to)
+                    );
+                    return None;
+                }
+                Err(error) => {
+                    eprintln!(
+                        "{} {} juga gagal memuat episode: {:#}",
+                        "■".red(),
+                        ext::provider_name(to),
+                        error
+                    );
+                    return None;
+                }
+            };
+
+        self.switch_provider(to);
+        self.current_movie = Some(fallback_movie.clone());
+        self.episode_cache
+            .insert(fallback_movie.id.clone(), (episodes.clone(), meta.clone()));
+        notify_fallback_success(to);
+        Some((episodes, meta))
+    }
+
+    async fn try_fallback_streams(
+        &mut self,
+        episode: &Episode,
+        reason: &str,
+    ) -> Option<Vec<Stream>> {
+        if !self.fallback_enabled {
+            return None;
+        }
+        let movie = self.current_movie.clone()?;
+        let from = self.provider_type;
+        let to = alternate_provider(from);
+        notify_fallback(from, to, reason);
+
+        let title = fallback_movie_title(&movie);
+        if title.is_empty() {
+            return None;
+        }
+
+        let mut extractor = ext::make_extractor(to);
+        let candidates = match retry_search(extractor.as_mut(), &title, 1).await {
+            Ok((movies, _)) if !movies.is_empty() => movies,
+            Ok(_) => {
+                eprintln!(
+                    "{} {} juga tidak menemukan judul yang cocok.",
+                    "■".red(),
+                    ext::provider_name(to)
+                );
+                return None;
+            }
+            Err(error) => {
+                eprintln!(
+                    "{} {} juga gagal mencari judul: {:#}",
+                    "■".red(),
+                    ext::provider_name(to),
+                    error
+                );
+                return None;
+            }
+        };
+
+        let Some(fallback_movie) = best_movie_match(&movie, &candidates) else {
+            eprintln!(
+                "{} {} tidak menemukan judul yang cocok untuk '{}'.",
+                "■".red(),
+                ext::provider_name(to),
+                title
+            );
+            return None;
+        };
+
+        let (episodes, meta) =
+            match retry_episodes(extractor.as_ref(), &fallback_movie).await {
+                Ok(item) if !item.0.is_empty() => item,
+                Ok(_) => {
+                    eprintln!(
+                        "{} {} juga tidak memiliki daftar episode.",
+                        "■".red(),
+                        ext::provider_name(to)
+                    );
+                    return None;
+                }
+                Err(error) => {
+                    eprintln!(
+                        "{} {} juga gagal memuat episode: {:#}",
+                        "■".red(),
+                        ext::provider_name(to),
+                        error
+                    );
+                    return None;
+                }
+            };
+
+        let Some(fallback_episode) = best_episode_match(episode, &episodes) else {
+            eprintln!(
+                "{} {} tidak menemukan episode yang cocok untuk '{}'.",
+                "■".red(),
+                ext::provider_name(to),
+                episode.title.trim()
+            );
+            return None;
+        };
+
+        let streams =
+            match retry_streams(extractor.as_ref(), &fallback_episode).await {
+                Ok(streams) if !streams.is_empty() => streams,
+                Ok(_) => {
+                    eprintln!(
+                        "{} {} juga tidak memiliki server stream.",
+                        "■".red(),
+                        ext::provider_name(to)
+                    );
+                    return None;
+                }
+                Err(error) => {
+                    eprintln!(
+                        "{} {} juga gagal memuat stream: {:#}",
+                        "■".red(),
+                        ext::provider_name(to),
+                        error
+                    );
+                    return None;
+                }
+            };
+
+        self.switch_provider(to);
+        self.current_movie = Some(fallback_movie.clone());
+        self.current_episode = Some(fallback_episode.clone());
+        self.episode_cache
+            .insert(fallback_movie.id.clone(), (episodes, meta));
+        self.stream_cache
+            .insert(fallback_episode.id.clone(), streams.clone());
+        notify_fallback_success(to);
+        Some(streams)
     }
 
     pub async fn search(&mut self, search_title: &str) -> anyhow::Result<Option<Movie>> {
@@ -287,31 +781,70 @@ impl AnimekuCli {
                 let spinner_message = format!("Mencari '{}'...", search_title);
                 let result = crate::util::with_spinner(
                     spinner_message,
-                    self.extractor.search(search_title.into(), page),
+                    retry_search(self.extractor.as_mut(), search_title, page),
                 )
                 .await;
                 let (movie_list, total_pages) = match result {
-                    Ok(result) => result,
+                    Ok((movies, total)) if !movies.is_empty() || page != 1 => {
+                        (movies, total)
+                    }
+                    Ok((movies, total)) => {
+                        match self
+                            .try_search_fallback(search_title, "tidak ada hasil")
+                            .await
+                        {
+                            Some(result) => result,
+                            None => (movies, total),
+                        }
+                    }
                     Err(error) => {
-                        eprintln!(
-                            "{} Gagal mencari '{}': {:#}",
-                            "■".red(),
-                            search_title,
-                            error
-                        );
-                        println!();
-                        println!("Periksa koneksi internet lalu coba lagi.");
-                        println!("Tekan Enter untuk kembali...");
-                        let mut dummy = String::new();
-                        let _ = std::io::stdin().read_line(&mut dummy);
-                        return Ok(None);
+                        if page == 1 {
+                            if let Some(result) = self
+                                .try_search_fallback(
+                                    search_title,
+                                    &format!("{:#}", error),
+                                )
+                                .await
+                            {
+                                result
+                            } else {
+                                eprintln!(
+                                    "{} Gagal mencari '{}' di {}: {:#}",
+                                    "■".red(),
+                                    search_title,
+                                    ext::provider_name(self.provider_type),
+                                    error
+                                );
+                                println!();
+                                println!("Periksa koneksi internet lalu coba lagi.");
+                                println!("Tekan Enter untuk kembali...");
+                                let mut dummy = String::new();
+                                let _ = std::io::stdin().read_line(&mut dummy);
+                                return Ok(None);
+                            }
+                        } else {
+                            eprintln!(
+                                "{} Gagal mencari '{}' di {}: {:#}",
+                                "■".red(),
+                                search_title,
+                                ext::provider_name(self.provider_type),
+                                error
+                            );
+                            println!();
+                            println!("Periksa koneksi internet lalu coba lagi.");
+                            println!("Tekan Enter untuk kembali...");
+                            let mut dummy = String::new();
+                            let _ = std::io::stdin().read_line(&mut dummy);
+                            return Ok(None);
+                        }
                     }
                 };
                 if page == 1 && !movie_list.is_empty() {
                     println!(
-                        "{} Ditemukan {} judul",
+                        "{} Ditemukan {} judul di {}",
                         "✓".green(),
-                        movie_list.len().to_string().green()
+                        movie_list.len().to_string().green(),
+                        ext::provider_name(self.provider_type).cyan()
                     );
                 }
                 self.movie_cache
@@ -397,6 +930,8 @@ impl AnimekuCli {
                 SearchAction::Separator => continue,
                 SearchAction::Select => {
                     if let Some(movie) = item.movie {
+                        self.current_movie = Some(movie.clone());
+                        self.current_episode = None;
                         return Ok(Some(movie));
                     }
                     continue;
@@ -406,30 +941,60 @@ impl AnimekuCli {
     }
 
     pub async fn extract_episode(&mut self, movie: Movie) -> anyhow::Result<Option<Episode>> {
+        self.current_movie = Some(movie.clone());
+        self.current_episode = None;
         let id = movie.id.clone();
-        let watch_state = EpisodeWatchState::from_movie(&id);
         let spinner_message = format!("Memuat daftar episode '{}'...", movie.title.trim());
 
-        if !self.episode_cache.contains_key(&id) {
-            let result =
-                crate::util::with_spinner(spinner_message, self.extractor.get_episodes(movie))
-                    .await;
-            match result {
-                Ok(item) => {
-                    self.episode_cache.insert(id.clone(), item);
-                }
-                Err(error) => {
-                    eprintln!("{} Gagal memuat episode: {:#}", "■".red(), error);
-                    println!();
-                    println!("Tekan Enter untuk kembali ke daftar judul...");
-                    let mut dummy = String::new();
-                    let _ = std::io::stdin().read_line(&mut dummy);
-                    return Ok(None);
-                }
-            }
-        }
+        let (episodes, meta) = if let Some(cached) = self.episode_cache.get(&id) {
+            cached.clone()
+        } else {
+            let result = crate::util::with_spinner(
+                spinner_message,
+                retry_episodes(self.extractor.as_ref(), &movie),
+            )
+            .await;
 
-        let (episodes, meta) = self.episode_cache.get(&id).unwrap().to_owned();
+            match result {
+                Ok(item) if !item.0.is_empty() => {
+                    self.episode_cache.insert(id.clone(), item.clone());
+                    item
+                }
+                Ok(item) => match self
+                    .try_fallback_episodes(&movie, "daftar episode kosong")
+                    .await
+                {
+                    Some(fallback) => fallback,
+                    None => item,
+                },
+                Err(error) => match self
+                    .try_fallback_episodes(&movie, &format!("{:#}", error))
+                    .await
+                {
+                    Some(fallback) => fallback,
+                    None => {
+                        eprintln!(
+                            "{} Gagal memuat episode dari {}: {:#}",
+                            "■".red(),
+                            ext::provider_name(self.provider_type),
+                            error
+                        );
+                        println!();
+                        println!("Tekan Enter untuk kembali ke daftar judul...");
+                        let mut dummy = String::new();
+                        let _ = std::io::stdin().read_line(&mut dummy);
+                        return Ok(None);
+                    }
+                },
+            }
+        };
+
+        let active_id = self
+            .current_movie
+            .as_ref()
+            .map(|current| current.id.clone())
+            .unwrap_or(id);
+        let watch_state = EpisodeWatchState::from_movie(&active_id);
         if episodes.is_empty() {
             eprintln!(
                 "{} {}",
@@ -442,7 +1007,11 @@ impl AnimekuCli {
             return Ok(None);
         }
 
-        println!("{} Daftar episode dimuat", "✓".green());
+        println!(
+            "{} Daftar episode dimuat dari {}",
+            "✓".green(),
+            ext::provider_name(self.provider_type).cyan()
+        );
         println!(
             "\n  {}{}\n",
             " ".repeat(45 / 2 - 5),
@@ -533,29 +1102,60 @@ impl AnimekuCli {
         &mut self,
         episode: Episode,
     ) -> anyhow::Result<Option<Stream>> {
+        self.current_episode = Some(episode.clone());
         let id = episode.id.clone();
         let spinner_message = format!("Memuat server stream '{}'...", episode.title.trim());
 
-        if !self.stream_cache.contains_key(&id) {
-            let result =
-                crate::util::with_spinner(spinner_message, self.extractor.get_stream_urls(episode))
-                    .await;
-            match result {
-                Ok(streams) => {
-                    self.stream_cache.insert(id.clone(), streams);
-                }
-                Err(error) => {
-                    eprintln!("{} Gagal memuat server stream: {:#}", "■".red(), error);
-                    println!();
-                    println!("Tekan Enter untuk kembali...");
-                    let mut dummy = String::new();
-                    let _ = std::io::stdin().read_line(&mut dummy);
-                    return Ok(None);
-                }
-            }
-        }
+        let streams = if let Some(cached) = self.stream_cache.get(&id) {
+            cached.clone()
+        } else {
+            let result = crate::util::with_spinner(
+                spinner_message,
+                retry_streams(self.extractor.as_ref(), &episode),
+            )
+            .await;
 
-        let streams = self.stream_cache.get(&id).unwrap().to_owned();
+            let streams = match result {
+                Ok(streams) if !streams.is_empty() => streams,
+                Ok(streams) => match self
+                    .try_fallback_streams(&episode, "server stream kosong")
+                    .await
+                {
+                    Some(fallback) => fallback,
+                    None => streams,
+                },
+                Err(error) => match self
+                    .try_fallback_streams(&episode, &format!("{:#}", error))
+                    .await
+                {
+                    Some(fallback) => fallback,
+                    None => {
+                        eprintln!(
+                            "{} Gagal memuat server stream dari {}: {:#}",
+                            "■".red(),
+                            ext::provider_name(self.provider_type),
+                            error
+                        );
+                        println!();
+                        println!("Tekan Enter untuk kembali...");
+                        let mut dummy = String::new();
+                        let _ = std::io::stdin().read_line(&mut dummy);
+                        return Ok(None);
+                    }
+                },
+            };
+
+            if !streams.is_empty()
+                && self
+                    .current_episode
+                    .as_ref()
+                    .is_some_and(|current| current.id == id)
+            {
+                self.stream_cache.insert(id.clone(), streams.clone());
+            }
+            streams
+        };
+
         if streams.is_empty() {
             eprintln!(
                 "{} {}",
@@ -567,7 +1167,11 @@ impl AnimekuCli {
             let _ = std::io::stdin().read_line(&mut dummy);
             return Ok(None);
         }
-        println!("{} Server stream dimuat", "✓".green());
+        println!(
+            "{} Server stream dimuat dari {}",
+            "✓".green(),
+            ext::provider_name(self.provider_type).cyan()
+        );
 
         let mut opts = streams;
         opts.push(Stream {
@@ -691,6 +1295,135 @@ mod tests {
 
     fn labels(items: &[SearchMenuItem]) -> Vec<&str> {
         items.iter().map(|item| item.label.as_str()).collect()
+    }
+
+    #[test]
+    fn fallback_movie_matching_ignores_provider_noise() {
+        let target = Movie {
+            id: "id|series".into(),
+            title: "[Series] Jujutsu Kaisen Season 2".into(),
+            total_episodes: None,
+        };
+        let candidates = vec![
+            Movie {
+                id: "other".into(),
+                title: "Jujutsu Kaisen".into(),
+                total_episodes: None,
+            },
+            Movie {
+                id: "match".into(),
+                title: "Jujutsu Kaisen Season 2 (Episode 1 - 12) Subtitle Indonesia".into(),
+                total_episodes: None,
+            },
+        ];
+
+        assert_eq!(
+            best_movie_match(&target, &candidates).map(|movie| movie.id),
+            Some("match".to_string())
+        );
+        assert_eq!(
+            fallback_movie_title(&target),
+            "Jujutsu Kaisen Season 2"
+        );
+    }
+
+    #[test]
+    fn fallback_episode_matching_handles_season_and_full_movie_formats() {
+        let episodes = vec![
+            Episode {
+                id: "ep-1".into(),
+                title: "Episode 1".into(),
+                is_series: true,
+            },
+            Episode {
+                id: "ep-2".into(),
+                title: "Episode 2".into(),
+                is_series: true,
+            },
+        ];
+        let season_target = Episode {
+            id: "s1e1".into(),
+            title: "S1E01 - To You in 2016".into(),
+            is_series: true,
+        };
+        assert_eq!(
+            best_episode_match(&season_target, &episodes).map(|episode| episode.id),
+            Some("ep-1".to_string())
+        );
+
+        let full_movie = Episode {
+            id: "full".into(),
+            title: "Putar Film (Full Movie)".into(),
+            is_series: false,
+        };
+        let full_candidates = vec![
+            Episode {
+                id: "series".into(),
+                title: "Episode 1".into(),
+                is_series: true,
+            },
+            Episode {
+                id: "movie".into(),
+                title: "Full Movie".into(),
+                is_series: false,
+            },
+        ];
+        assert_eq!(
+            best_episode_match(&full_movie, &full_candidates).map(|episode| episode.id),
+            Some("movie".to_string())
+        );
+    }
+
+    #[test]
+    fn alternate_provider_switches_between_the_two_supported_sites() {
+        assert_eq!(
+            alternate_provider(ext::PROVIDER_IDLIX),
+            ext::PROVIDER_OTAKUDESU
+        );
+        assert_eq!(
+            alternate_provider(ext::PROVIDER_OTAKUDESU),
+            ext::PROVIDER_IDLIX
+        );
+    }
+
+    struct FlakySearchExt {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ext::Ext for FlakySearchExt {
+        async fn search(
+            &mut self,
+            _title: String,
+            _page: usize,
+        ) -> anyhow::Result<(Vec<Movie>, u64)> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call < 3 {
+                anyhow::bail!("transient failure");
+            }
+            Ok((vec![movie("recovered")], 1))
+        }
+
+        async fn get_episodes(&self, _movie: Movie) -> anyhow::Result<(Vec<Episode>, Meta)> {
+            Ok((Vec::new(), Meta::default()))
+        }
+
+        async fn get_stream_urls(&self, _episode: Episode) -> anyhow::Result<Vec<Stream>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_search_recovers_after_transient_failures() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut extractor = FlakySearchExt {
+            calls: calls.clone(),
+        };
+
+        let (movies, total) = retry_search(&mut extractor, "test", 1).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(movies.len(), 1);
+        assert_eq!(total, 1);
     }
 
     #[test]

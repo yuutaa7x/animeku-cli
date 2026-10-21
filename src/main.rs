@@ -5,7 +5,6 @@ use std::sync::OnceLock;
 use animeku::AnimekuCli;
 use colored::Colorize;
 use ext::otakudesu::{OTAKUDESU_REFERER, OTAKUDESU_USER_AGENT};
-use ext::Ext;
 use tokio::runtime;
 
 use crate::{input::{get_user_input, load_history, save_history, pick_provider, load_watch_history, delete_watch_entry, delete_search_history_entry}, util::clearscreen_and_show_banner};
@@ -43,8 +42,8 @@ fn mpv_last_pos_file_path() -> String {
     crate::util::temp_file("animeku_last_pos.txt")
 }
 
-const PROVIDER_IDLIX: usize = 0;
-pub const PROVIDER_OTAKUDESU: usize = 1;
+const PROVIDER_IDLIX: usize = ext::PROVIDER_IDLIX;
+pub const PROVIDER_OTAKUDESU: usize = ext::PROVIDER_OTAKUDESU;
 
 const REPO_URL: &str = "https://github.com/yuutaa7x/animeku-cli";
 
@@ -178,18 +177,6 @@ fn parse_args() -> anyhow::Result<CliArgs> {
     }
 
     Ok(args)
-}
-
-fn get_ext_by_provider(provider_type: usize) -> Box<dyn Ext> {
-    match provider_type {
-        PROVIDER_IDLIX => Box::new(ext::idlix::Idlix::new()),
-        PROVIDER_OTAKUDESU => Box::new(ext::otakudesu::Otakudesu::new()),
-        _ => Box::new(ext::idlix::Idlix::new()),
-    }
-}
-
-fn get_ext(input: &crate::models::Input) -> Box<dyn Ext> {
-    get_ext_by_provider(input.tipe)
 }
 
 fn check_command_exists(cmd: &str) -> bool {
@@ -1080,13 +1067,30 @@ async fn play_episode(
     animeku: &mut AnimekuCli,
     movie: &crate::models::Movie,
     episode: &crate::models::Episode,
-    provider_type: usize,
     start_seconds: u64,
     discord: &mut Option<DiscordIpcClient>,
 ) -> anyhow::Result<EpisodePlayback> {
     clearscreen_and_show_banner()?;
 
-    let season_num = detect_season_for_episode(animeku, movie, episode);
+    let stream_opt = animeku.extract_stream_urls(episode.clone()).await?;
+    let Some(stream) = stream_opt else {
+        reset_discord_status(discord);
+        return Ok(EpisodePlayback::StreamCancelled);
+    };
+
+    // Provider fallback may replace both the movie and episode with the other
+    // site's equivalents. Use the active values for RPC, playback, and history
+    // so stale IDs are never persisted.
+    let movie = animeku
+        .current_movie()
+        .cloned()
+        .unwrap_or_else(|| movie.clone());
+    let episode = animeku
+        .current_episode()
+        .cloned()
+        .unwrap_or_else(|| episode.clone());
+    let provider_type = animeku.provider_type();
+    let season_num = detect_season_for_episode(animeku, &movie, &episode);
     let thumb_url = animeku.get_meta(&movie.id).and_then(|m| m.thumb_url);
 
     update_discord_status(
@@ -1099,12 +1103,6 @@ async fn play_episode(
     )
     .await;
 
-    let stream_opt = animeku.extract_stream_urls(episode.clone()).await?;
-    let Some(stream) = stream_opt else {
-        reset_discord_status(discord);
-        return Ok(EpisodePlayback::StreamCancelled);
-    };
-
     let outcome = execute_player(&stream.url, provider_type, start_seconds).await?;
     reset_discord_status(discord);
 
@@ -1116,8 +1114,8 @@ async fn play_episode(
             completed,
         } => {
             input::save_watch_entry(&crate::models::WatchEntry {
-                movie: movie.clone(),
-                episode: episode.clone(),
+                movie,
+                episode,
                 provider_type,
                 position_seconds: position,
                 completed,
@@ -1128,38 +1126,57 @@ async fn play_episode(
     }
 }
 
+fn sync_active_playback(
+    animeku: &AnimekuCli,
+    movie: &mut crate::models::Movie,
+    episode: &mut crate::models::Episode,
+) {
+    if let Some(active_movie) = animeku.current_movie() {
+        *movie = active_movie.clone();
+    }
+    if let Some(active_episode) = animeku.current_episode() {
+        *episode = active_episode.clone();
+    }
+}
+
 async fn handle_movie_episodes(
     animeku: &mut AnimekuCli,
     movie: &crate::models::Movie,
-    provider_type: usize,
     discord: &mut Option<DiscordIpcClient>,
 ) -> anyhow::Result<()> {
+    let mut active_movie = movie.clone();
     'movie_list: loop {
         clearscreen_and_show_banner()?;
-        let mut episode = match animeku.extract_episode(movie.clone()).await? {
-            Some(ep) => ep,
-            None => break, // Back to movie search
+        let Some(mut episode) = animeku.extract_episode(active_movie.clone()).await? else {
+            break; // Back to movie search
         };
+        if let Some(current_movie) = animeku.current_movie() {
+            active_movie = current_movie.clone();
+        }
         // Full movies skip the episode picker, so cancelling the stream picker
         // should return to search instead of looping back to the same movie.
-        let single_movie = !episode.is_series;
-
         loop {
-            match play_episode(animeku, movie, &episode, provider_type, 0, discord).await? {
-                EpisodePlayback::PlayerCancelled => continue,
+            match play_episode(animeku, &active_movie, &episode, 0, discord).await? {
+                EpisodePlayback::PlayerCancelled => {
+                    sync_active_playback(animeku, &mut active_movie, &mut episode);
+                    continue;
+                }
                 EpisodePlayback::StreamCancelled => {
-                    if single_movie {
+                    sync_active_playback(animeku, &mut active_movie, &mut episode);
+                    if !episode.is_series {
                         break 'movie_list;
                     }
                     break;
                 }
                 EpisodePlayback::Played { offer_next } => {
+                    sync_active_playback(animeku, &mut active_movie, &mut episode);
+                    let single_movie = !episode.is_series;
                     if offer_next {
                         // Auto-next logic: follow the provider's ordered episode
                         // list so the last episode of a season advances to the
                         // next season.
                         let next_ep_opt = animeku
-                            .get_episode_list(&movie.id)
+                            .get_episode_list(&active_movie.id)
                             .and_then(|episodes| find_next_episode(&episodes, &episode).cloned());
 
                         if let Some(next_ep) = next_ep_opt {
@@ -1189,31 +1206,35 @@ async fn resume_watch_entry(
     entry: &crate::models::WatchEntry,
     start_seconds: u64,
 ) -> anyhow::Result<()> {
-    let mut animeku = AnimekuCli::new(get_ext_by_provider(entry.provider_type));
+    let mut animeku = AnimekuCli::for_provider(entry.provider_type);
     // Populate the episode cache so auto-next can follow the provider's
     // ordered list instead of stopping after the resumed episode.
     let _ = animeku.ensure_meta(&entry.movie).await;
 
+    let mut movie = entry.movie.clone();
     let mut episode = entry.episode.clone();
     let mut start_seconds = start_seconds;
 
     loop {
         match play_episode(
             &mut animeku,
-            &entry.movie,
+            &movie,
             &episode,
-            entry.provider_type,
             start_seconds,
             discord,
         )
         .await?
         {
-            EpisodePlayback::PlayerCancelled => continue,
+            EpisodePlayback::PlayerCancelled => {
+                sync_active_playback(&animeku, &mut movie, &mut episode);
+                continue;
+            }
             EpisodePlayback::StreamCancelled => break,
             EpisodePlayback::Played { offer_next } => {
+                sync_active_playback(&animeku, &mut movie, &mut episode);
                 if offer_next {
                     let next_ep_opt = animeku
-                        .get_episode_list(&entry.movie.id)
+                        .get_episode_list(&movie.id)
                         .and_then(|episodes| find_next_episode(&episodes, &episode).cloned());
 
                     if let Some(next_ep) = next_ep_opt {
@@ -1585,7 +1606,7 @@ async fn run_cli_search(
         anyhow::bail!("judul pencarian kosong");
     }
 
-    let tipe = provider_override()
+    let mut tipe = provider_override()
         .or_else(|| {
             match config::Config::load().provider {
                 config::ProviderPreference::Idlix => Some(PROVIDER_IDLIX),
@@ -1597,16 +1618,24 @@ async fn run_cli_search(
     input::save_search_provider(&title, tipe);
     save_history(&title);
 
-    let input_data = crate::models::Input { title, tipe };
-    let extractor = get_ext(&input_data);
-    let mut animeku = AnimekuCli::new(extractor);
+    let mut animeku = AnimekuCli::for_provider(tipe);
 
     loop {
         clearscreen_and_show_banner()?;
-        let Some(movie) = animeku.search(&input_data.title).await? else {
+        let movie = animeku.search(&title).await?;
+        let active_provider = animeku.provider_type();
+        if active_provider != tipe {
+            tipe = active_provider;
+            input::save_search_provider(&title, tipe);
+        }
+        let Some(movie) = movie else {
             break;
         };
-        handle_movie_episodes(&mut animeku, &movie, tipe, discord).await?;
+        handle_movie_episodes(&mut animeku, &movie, discord).await?;
+        if animeku.provider_type() != tipe {
+            tipe = animeku.provider_type();
+            input::save_search_provider(&title, tipe);
+        }
     }
 
     Ok(())
@@ -1620,17 +1649,22 @@ async fn handle_search_and_watch(discord: &mut Option<DiscordIpcClient>) -> anyh
             None => break, // Back to watch submenu
         };
 
-        let extractor = get_ext(&input);
-        let mut animeku = AnimekuCli::new(extractor);
+        let mut animeku = AnimekuCli::for_provider(input.tipe);
 
         loop {
             clearscreen_and_show_banner()?;
-            let movie = match animeku.search(&input.title).await? {
-                Some(selected_movie) => selected_movie,
-                None => break, // Back to input prompt
+            let movie = animeku.search(&input.title).await?;
+            if animeku.provider_type() != input.tipe {
+                input::save_search_provider(&input.title, animeku.provider_type());
+            }
+            let Some(movie) = movie else {
+                break; // Back to input prompt
             };
 
-            handle_movie_episodes(&mut animeku, &movie, input.tipe, discord).await?;
+            handle_movie_episodes(&mut animeku, &movie, discord).await?;
+            if animeku.provider_type() != input.tipe {
+                input::save_search_provider(&input.title, animeku.provider_type());
+            }
         }
     }
     Ok(())
@@ -1647,11 +1681,7 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
 
         // 1. Add Watch History entries
         for lw in &watch_history {
-            let provider_name = if lw.provider_type == PROVIDER_OTAKUDESU {
-                "Otakudesu"
-            } else {
-                "Idlix"
-            };
+            let provider_name = ext::provider_name(lw.provider_type);
             menu_items.push(input::MenuEntry::new(format!(
                 "[ {} - {} | {} | {} | {} ]",
                 crate::models::clean_movie_title(&lw.movie.title),
@@ -1724,12 +1754,10 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
             println!("  Episode  : {}", display_episode);
             println!("  Status   : {}", selected_watch.status_label());
             println!("  Terakhir : {}", selected_watch.format_updated());
-            let provider_name = if selected_watch.provider_type == PROVIDER_OTAKUDESU {
-                "Otakudesu"
-            } else {
-                "Idlix"
-            };
-            println!("  Provider : {}\n", provider_name);
+            println!(
+                "  Provider : {}\n",
+                ext::provider_name(selected_watch.provider_type)
+            );
 
             let actions = [
                 format!(
@@ -1760,14 +1788,8 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
                 continue;
             } else if action_choice == 2 {
                 let mut animeku =
-                    AnimekuCli::new(get_ext_by_provider(selected_watch.provider_type));
-                handle_movie_episodes(
-                    &mut animeku,
-                    &selected_watch.movie,
-                    selected_watch.provider_type,
-                    discord,
-                )
-                .await?;
+                    AnimekuCli::for_provider(selected_watch.provider_type);
+                handle_movie_episodes(&mut animeku, &selected_watch.movie, discord).await?;
                 continue;
             }
 
@@ -1840,17 +1862,21 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
             };
             save_history(&selected_title);
 
-            let input_data = crate::models::Input { title: selected_title, tipe };
-            let extractor = get_ext(&input_data);
-            let mut animeku = AnimekuCli::new(extractor);
+            let mut animeku = AnimekuCli::for_provider(tipe);
 
             loop {
                 clearscreen_and_show_banner()?;
-                let movie = match animeku.search(&input_data.title).await? {
-                    Some(m) => m,
-                    None => break,
+                let movie = animeku.search(&selected_title).await?;
+                if animeku.provider_type() != tipe {
+                    input::save_search_provider(&selected_title, animeku.provider_type());
+                }
+                let Some(movie) = movie else {
+                    break;
                 };
-                handle_movie_episodes(&mut animeku, &movie, input_data.tipe, discord).await?;
+                handle_movie_episodes(&mut animeku, &movie, discord).await?;
+                if animeku.provider_type() != tipe {
+                    input::save_search_provider(&selected_title, animeku.provider_type());
+                }
             }
         }
     }
