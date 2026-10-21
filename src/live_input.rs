@@ -73,7 +73,7 @@ async fn fetch_suggestions(query: String, tx: mpsc::Sender<FetchResult>) {
     
     // Create client with timeout and User-Agent (some APIs block default agents or hang)
     let client = match reqwest::Client::builder()
-        .user_agent("animeku-cli/0.2.0")
+        .user_agent(concat!("animeku-cli/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(4))
         .build() 
     {

@@ -200,7 +200,7 @@ pub async fn show_image_thumb(url: String) {
         None => {
             let client = Client::builder()
                 .timeout(std::time::Duration::from_secs(8))
-                .user_agent("animeku-cli/0.2.0")
+                .user_agent(concat!("animeku-cli/", env!("CARGO_PKG_VERSION")))
                 .build()
                 .unwrap_or_else(|_| Client::new());
             let Ok(resp) = client.get(&url).send().await else {
