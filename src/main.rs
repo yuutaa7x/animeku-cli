@@ -1271,6 +1271,7 @@ async fn handle_resume_latest(discord: &mut Option<DiscordIpcClient>) -> anyhow:
 enum MainAction {
     Continue,
     Search,
+    Watchlist,
     History,
     Settings,
     Health,
@@ -1294,13 +1295,20 @@ fn show_main_menu() -> anyhow::Result<Option<MainAction>> {
         actions.push(MainAction::Continue);
     }
 
+    let watchlist_count = input::load_watchlist().len();
+    let watchlist_label = if watchlist_count > 0 {
+        format!("Watchlist ({})", watchlist_count)
+    } else {
+        "Watchlist".to_string()
+    };
     for (label, action) in [
-        ("Cari anime / film", MainAction::Search),
-        ("Riwayat", MainAction::History),
-        ("Pengaturan", MainAction::Settings),
-        ("Cek kesehatan", MainAction::Health),
-        ("Perbarui Animeku-CLI", MainAction::Update),
-        ("Keluar", MainAction::Exit),
+        ("Cari anime / film".to_string(), MainAction::Search),
+        (watchlist_label, MainAction::Watchlist),
+        ("Riwayat".to_string(), MainAction::History),
+        ("Pengaturan".to_string(), MainAction::Settings),
+        ("Cek kesehatan".to_string(), MainAction::Health),
+        ("Perbarui Animeku-CLI".to_string(), MainAction::Update),
+        ("Keluar".to_string(), MainAction::Exit),
     ] {
         entries.push(input::MenuEntry::new(label));
         actions.push(action);
@@ -1417,6 +1425,7 @@ async fn handle_settings_menu(discord: &mut Option<DiscordIpcClient>) -> anyhow:
             ),
             "Hapus riwayat pencarian".to_string(),
             "Hapus riwayat tontonan".to_string(),
+            "Hapus watchlist".to_string(),
             "Hapus cache metadata & provider".to_string(),
             "Perbarui Animeku-CLI".to_string(),
             "Kembali".to_string(),
@@ -1469,13 +1478,18 @@ async fn handle_settings_menu(discord: &mut Option<DiscordIpcClient>) -> anyhow:
                 }
             }
             8 => {
+                if confirm_action("Hapus semua watchlist?")? {
+                    input::clear_watchlist();
+                }
+            }
+            9 => {
                 if confirm_action("Hapus cache metadata, deteksi, dan pilihan provider?")? {
                     crate::cache::clear();
                     input::clear_provider_detections();
                     input::clear_search_providers();
                 }
             }
-            9 => handle_self_update()?,
+            10 => handle_self_update()?,
             _ => break,
         }
     }
@@ -1885,6 +1899,159 @@ async fn handle_resume_last_watch(discord: &mut Option<DiscordIpcClient>) -> any
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchlistAction {
+    OpenEpisodes,
+    Resume,
+    Remove,
+    Back,
+}
+
+async fn handle_watchlist(discord: &mut Option<DiscordIpcClient>) -> anyhow::Result<()> {
+    loop {
+        clearscreen_and_show_banner()?;
+        let watchlist = input::load_watchlist();
+        if watchlist.is_empty() {
+            println!("Watchlist masih kosong.\n");
+            println!(
+                "Tambahkan judul lewat menu [ ☆ Tambah ke Watchlist ] saat memilih episode/server.\n"
+            );
+            println!("Tekan Enter untuk kembali...");
+            let mut dummy = String::new();
+            let _ = std::io::stdin().read_line(&mut dummy);
+            return Ok(());
+        }
+
+        let history = load_watch_history();
+        let mut entries = Vec::with_capacity(watchlist.len() + 3);
+        for entry in &watchlist {
+            let title = crate::models::clean_movie_title(&entry.movie.title);
+            let last = history.iter().find(|item| {
+                item.provider_type == entry.provider_type && item.movie.id == entry.movie.id
+            });
+            let status = last
+                .map(|item| {
+                    format!(
+                        "{} • {}",
+                        crate::models::clean_episode_title(&item.episode.title),
+                        item.status_label()
+                    )
+                })
+                .unwrap_or_else(|| "belum ditonton".to_string());
+            entries.push(input::MenuEntry::new(format!(
+                "[ {} • {} • {} ]",
+                title,
+                status,
+                ext::provider_name(entry.provider_type)
+            )));
+        }
+
+        let separator_index = entries.len();
+        entries.push(input::MenuEntry::separator(
+            "─── Aksi ─────────────────────────────────────",
+        ));
+        entries.push(input::MenuEntry::new("Hapus Semua Watchlist"));
+        entries.push(input::MenuEntry::new("Kembali"));
+
+        let Some(choice) = input::select_menu_q_back("Watchlist:", &entries, 0)? else {
+            break;
+        };
+        if choice == separator_index + 1 {
+            if confirm_action("Hapus semua watchlist?")? {
+                input::clear_watchlist();
+            }
+            continue;
+        }
+        if choice == separator_index + 2 || choice >= watchlist.len() {
+            break;
+        }
+
+        let entry = watchlist[choice].clone();
+        let last = history
+            .iter()
+            .find(|item| {
+                item.provider_type == entry.provider_type && item.movie.id == entry.movie.id
+            })
+            .cloned();
+
+        clearscreen_and_show_banner()?;
+        println!("Watchlist:");
+        println!(
+            "  Judul    : {}",
+            crate::models::clean_movie_title(&entry.movie.title)
+        );
+        println!("  Provider : {}", ext::provider_name(entry.provider_type));
+        println!("  Ditambah : {}", entry.format_added());
+        if let Some(last) = &last {
+            println!(
+                "  Terakhir : {} • {} • {}",
+                crate::models::clean_episode_title(&last.episode.title),
+                last.status_label(),
+                last.format_updated()
+            );
+        }
+        println!();
+
+        let mut labels = vec!["Pilih Episode / Putar".to_string()];
+        let mut actions = vec![WatchlistAction::OpenEpisodes];
+        if let Some(last) = &last {
+            labels.push(if last.completed {
+                "Putar Ulang Episode Terakhir".to_string()
+            } else {
+                "Lanjutkan Episode Terakhir".to_string()
+            });
+            actions.push(WatchlistAction::Resume);
+        }
+        labels.push("Hapus dari Watchlist".to_string());
+        actions.push(WatchlistAction::Remove);
+        labels.push("Kembali".to_string());
+        actions.push(WatchlistAction::Back);
+
+        let menu_entries = labels
+            .iter()
+            .cloned()
+            .map(input::MenuEntry::new)
+            .collect::<Vec<_>>();
+        let Some(action_index) =
+            input::select_menu_simple("Pilih Tindakan:", &menu_entries, 0)?
+        else {
+            continue;
+        };
+
+        match actions
+            .get(action_index)
+            .copied()
+            .unwrap_or(WatchlistAction::Back)
+        {
+            WatchlistAction::OpenEpisodes => {
+                let mut animeku = AnimekuCli::for_provider(entry.provider_type);
+                handle_movie_episodes(&mut animeku, &entry.movie, discord).await?;
+            }
+            WatchlistAction::Resume => {
+                if let Some(last) = last {
+                    let start_seconds = if last.completed {
+                        0
+                    } else {
+                        last.position_seconds
+                    };
+                    resume_watch_entry(discord, &last, start_seconds).await?;
+                }
+            }
+            WatchlistAction::Remove => {
+                let title = crate::models::clean_movie_title(&entry.movie.title);
+                if confirm_action(&format!("Hapus '{}' dari watchlist?", title))? {
+                    input::delete_watchlist_entry(
+                        entry.provider_type,
+                        &entry.movie.id,
+                    );
+                }
+            }
+            WatchlistAction::Back => {}
+        }
+    }
+    Ok(())
+}
+
 async fn run_app() -> anyhow::Result<()> {
     crate::util::cleanup_temp_files();
 
@@ -1933,6 +2100,9 @@ async fn run_app() -> anyhow::Result<()> {
             }
             MainAction::Search => {
                 handle_search_and_watch(&mut discord).await?;
+            }
+            MainAction::Watchlist => {
+                handle_watchlist(&mut discord).await?;
             }
             MainAction::History => {
                 handle_resume_last_watch(&mut discord).await?;

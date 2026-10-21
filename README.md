@@ -98,8 +98,18 @@ cargo uninstall animeku-cli
 - Pengecekan dependensi dan Check Health sistem yang interaktif.
 - Retry otomatis dan fallback Idlix ↔ Otakudesu saat provider error atau tidak mengembalikan hasil.
 - Cache metadata persisten untuk hasil pencarian dan daftar episode, sehingga pencarian ulang lebih cepat tanpa mengambil stream lama.
+- Watchlist untuk menyimpan judul, lalu langsung memilih episode atau melanjutkan tontonan terakhir dari menu utama.
 
 ### Changelog
+
+#### v0.3.4 — Watchlist (21 Oktober 2026)
+
+- Menu **Watchlist** baru di menu utama, lengkap dengan jumlah judul yang disimpan.
+- Judul bisa ditandai lewat menu `[ ☆ Tambah ke Watchlist ]` di daftar episode atau pemilih server/kualitas.
+- Dari watchlist kamu bisa langsung memilih episode, melanjutkan episode terakhir, memutar ulang episode yang sudah tamat, atau menghapus judul.
+- Status tontonan terakhir dan provider ditampilkan di daftar watchlist.
+- Watchlist disimpan di `~/.animeku_watchlist.json`.
+- Menu Pengaturan sekarang punya aksi **Hapus watchlist**.
 
 #### v0.3.3 — Cache metadata persisten (21 Oktober 2026)
 
@@ -150,7 +160,7 @@ Rilis ini fokus pada kenyamanan navigasi, riwayat, dan kontrol dari terminal.
 - Aksi "Pilih Episode Lain" langsung dari detail riwayat.
 - Provider pilihan per judul diingat, begitu juga hasil deteksi AniList, sehingga pencarian berulang tidak melakukan deteksi dari awal.
 - Override provider lewat config, CLI, atau aksi "Ganti Provider & Cari".
-- Menu Pengaturan untuk player default, auto-next, provider, Discord RPC, banner compact, poster episode, hapus riwayat, dan hapus cache metadata/provider.
+- Menu Pengaturan untuk player default, auto-next, provider, Discord RPC, banner compact, poster episode, hapus riwayat, hapus watchlist, dan hapus cache metadata/provider.
 - Config disimpan sebagai JSON di `dirs::config_dir()/animeku-cli/config.json` (Linux biasanya `~/.config/animeku-cli/config.json`).
 
 ##### Tampilan & Error Handling

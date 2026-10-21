@@ -235,6 +235,7 @@ enum SearchAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EpisodeAction {
     Back,
+    ToggleWatchlist,
     Search,
     Previous,
     Next,
@@ -353,14 +354,22 @@ fn build_episode_menu(
     page: usize,
     total_pages: u64,
     watch_state: &EpisodeWatchState,
+    watchlisted: bool,
 ) -> (Vec<input::MenuEntry>, Vec<EpisodeAction>) {
     let total_pages = total_pages.max(1);
     let page = page.clamp(1, total_pages as usize);
-    let mut entries = Vec::with_capacity(EPISODES_PER_PAGE + 5);
-    let mut actions = Vec::with_capacity(EPISODES_PER_PAGE + 5);
+    let mut entries = Vec::with_capacity(EPISODES_PER_PAGE + 6);
+    let mut actions = Vec::with_capacity(EPISODES_PER_PAGE + 6);
 
     entries.push(input::MenuEntry::new("[ Kembali ke Pilih Anime ]"));
     actions.push(EpisodeAction::Back);
+
+    entries.push(input::MenuEntry::new(if watchlisted {
+        "[ ★ Hapus dari Watchlist ]"
+    } else {
+        "[ ☆ Tambah ke Watchlist ]"
+    }));
+    actions.push(EpisodeAction::ToggleWatchlist);
 
     if total_pages > 1 {
         entries.push(input::MenuEntry::new("[ Cari Episode (semua halaman) ]"));
@@ -1149,11 +1158,10 @@ impl AnimekuCli {
             }
         };
 
-        let active_id = self
-            .current_movie
-            .as_ref()
-            .map(|current| current.id.clone())
-            .unwrap_or(id);
+        let active_movie = self.current_movie.clone().unwrap_or_else(|| movie.clone());
+        let active_id = active_movie.id.clone();
+        let active_provider = self.provider_type;
+        let mut watchlisted = input::is_in_watchlist(active_provider, &active_id);
         let watch_state = EpisodeWatchState::from_movie(&active_id);
         if episodes.is_empty() {
             eprintln!(
@@ -1207,7 +1215,8 @@ impl AnimekuCli {
         let mut page = 1usize;
 
         loop {
-            let (entries, actions) = build_episode_menu(&episodes, page, total_pages, &watch_state);
+            let (entries, actions) =
+                build_episode_menu(&episodes, page, total_pages, &watch_state, watchlisted);
             let default_index = actions
                 .iter()
                 .position(|action| matches!(action, EpisodeAction::Select(_)))
@@ -1240,6 +1249,16 @@ impl AnimekuCli {
 
             match actions[selected] {
                 EpisodeAction::Back => return Ok(None),
+                EpisodeAction::ToggleWatchlist => {
+                    if watchlisted {
+                        input::delete_watchlist_entry(active_provider, &active_movie.id);
+                        println!("{} Dihapus dari watchlist.", "✓".green());
+                    } else {
+                        input::add_watchlist_entry(&active_movie, active_provider);
+                        println!("{} Ditambahkan ke watchlist.", "✓".green());
+                    }
+                    watchlisted = !watchlisted;
+                }
                 EpisodeAction::Previous => {
                     page = page.saturating_sub(1).max(1);
                 }
@@ -1334,18 +1353,50 @@ impl AnimekuCli {
             ext::provider_name(self.provider_type).cyan()
         );
 
-        let mut opts = streams;
-        opts.push(Stream {
-            url: "0".into(),
-            title: "[ Kembali ke Pilih Episode ]".into(),
+        let active_movie = self.current_movie.clone();
+        let active_provider = self.provider_type;
+        let mut watchlisted = active_movie.as_ref().is_some_and(|movie| {
+            input::is_in_watchlist(active_provider, &movie.id)
         });
-        let Some(selected) = input::choice("Pilih Server / Kualitas:", opts, 0)? else {
-            return Ok(None);
-        };
-        if selected.url == "0" {
-            Ok(None)
-        } else {
-            Ok(Some(selected))
+
+        loop {
+            let mut opts = streams.clone();
+            if active_movie.is_some() {
+                opts.push(Stream {
+                    url: "watchlist".into(),
+                    title: if watchlisted {
+                        "[ ★ Hapus dari Watchlist ]"
+                    } else {
+                        "[ ☆ Tambah ke Watchlist ]"
+                    }
+                    .into(),
+                });
+            }
+            opts.push(Stream {
+                url: "0".into(),
+                title: "[ Kembali ke Pilih Episode ]".into(),
+            });
+            let Some(selected) = input::choice("Pilih Server / Kualitas:", opts, 0)? else {
+                return Ok(None);
+            };
+
+            if selected.url == "watchlist" {
+                if let Some(movie) = &active_movie {
+                    if watchlisted {
+                        input::delete_watchlist_entry(active_provider, &movie.id);
+                        println!("{} Dihapus dari watchlist.", "✓".green());
+                    } else {
+                        input::add_watchlist_entry(movie, active_provider);
+                        println!("{} Ditambahkan ke watchlist.", "✓".green());
+                    }
+                    watchlisted = !watchlisted;
+                }
+                continue;
+            }
+            if selected.url == "0" {
+                return Ok(None);
+            }
+            return Ok(Some(selected));
         }
     }
 }
@@ -1670,9 +1721,10 @@ mod tests {
         assert_eq!(total_pages, 2);
 
         let state = EpisodeWatchState::default();
-        let (_, first_page) = build_episode_menu(&episodes, 1, total_pages, &state);
+        let (_, first_page) = build_episode_menu(&episodes, 1, total_pages, &state, false);
         assert_eq!(first_page[0], EpisodeAction::Back);
-        assert_eq!(first_page[1], EpisodeAction::Search);
+        assert_eq!(first_page[1], EpisodeAction::ToggleWatchlist);
+        assert_eq!(first_page[2], EpisodeAction::Search);
         assert!(first_page.contains(&EpisodeAction::Select(0)));
         assert!(first_page.contains(&EpisodeAction::Select(24)));
         assert!(!first_page.contains(&EpisodeAction::Select(25)));
@@ -1686,7 +1738,7 @@ mod tests {
             EPISODES_PER_PAGE
         );
 
-        let (_, last_page) = build_episode_menu(&episodes, 2, total_pages, &state);
+        let (_, last_page) = build_episode_menu(&episodes, 2, total_pages, &state, true);
         assert!(last_page.contains(&EpisodeAction::Select(25)));
         assert!(last_page.contains(&EpisodeAction::Select(29)));
         assert!(!last_page.contains(&EpisodeAction::Select(24)));
@@ -1704,7 +1756,8 @@ mod tests {
     #[test]
     fn single_page_episode_menu_has_no_search_or_navigation() {
         let state = EpisodeWatchState::default();
-        let (_, actions) = build_episode_menu(&episode_list(5), 1, 1, &state);
+        let (_, actions) = build_episode_menu(&episode_list(5), 1, 1, &state, false);
+        assert!(actions.contains(&EpisodeAction::ToggleWatchlist));
         assert!(!actions.contains(&EpisodeAction::Search));
         assert!(!actions.contains(&EpisodeAction::Previous));
         assert!(!actions.contains(&EpisodeAction::Next));

@@ -68,6 +68,21 @@ impl WatchEntry {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WatchlistEntry {
+    pub movie: Movie,
+    pub provider_type: usize,
+    /// Unix timestamp (seconds) of when the title was added.
+    pub added_at: u64,
+}
+
+impl WatchlistEntry {
+    pub fn format_added(&self) -> String {
+        format_relative_time(self.added_at)
+    }
+}
+
 /// Human-friendly relative timestamp. Kept dependency-free because the only
 /// precision needed by the history screen is minutes/hours/days.
 pub fn format_relative_time(updated_at: u64) -> String {
@@ -213,6 +228,25 @@ mod tests {
             clean_episode_title("S1E01 - To You in 2016"),
             "S1E01 - To You in 2016"
         );
+    }
+
+    #[test]
+    fn test_watchlist_entry_serde() {
+        let entry = WatchlistEntry {
+            movie: Movie {
+                id: "solo-leveling".into(),
+                title: "Solo Leveling".into(),
+                total_episodes: Some("12".into()),
+            },
+            provider_type: 1,
+            added_at: 1_700_000_000,
+        };
+
+        let encoded = serde_json::to_string(&entry).unwrap();
+        let decoded: WatchlistEntry = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.movie.id, "solo-leveling");
+        assert_eq!(decoded.provider_type, 1);
+        assert_eq!(decoded.added_at, 1_700_000_000);
     }
 
     #[test]

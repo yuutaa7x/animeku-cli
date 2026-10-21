@@ -184,7 +184,7 @@ pub fn delete_search_history_entry(title: &str) {
 
 // ─── Watch History ────────────────────────────────────────────────────────────
 
-use crate::models::{Input, WatchEntry};
+use crate::models::{Input, Movie, WatchEntry, WatchlistEntry};
 
 const WATCH_HISTORY_FILE: &str = ".animeku_watch_history.json";
 const MAX_WATCH_HISTORY: usize = 30;
@@ -257,6 +257,86 @@ pub fn delete_watch_entry(index: usize) {
             let _ = fs::write(path, content);
         }
     }
+}
+
+// ─── Watchlist ───────────────────────────────────────────────────────────────
+
+const WATCHLIST_FILE: &str = ".animeku_watchlist.json";
+
+pub fn load_watchlist() -> Vec<WatchlistEntry> {
+    let Some(home) = dirs::home_dir() else {
+        return vec![];
+    };
+    let path = home.join(WATCHLIST_FILE);
+    let Ok(content) = fs::read_to_string(path) else {
+        return vec![];
+    };
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+fn write_watchlist(watchlist: &[WatchlistEntry]) {
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let path = home.join(WATCHLIST_FILE);
+    if let Ok(content) = serde_json::to_string_pretty(watchlist) {
+        let _ = fs::write(path, content);
+    }
+}
+
+fn now_seconds() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn push_watchlist_entry(
+    watchlist: &mut Vec<WatchlistEntry>,
+    movie: &Movie,
+    provider_type: usize,
+    added_at: u64,
+) {
+    watchlist.retain(|entry| {
+        !(entry.provider_type == provider_type && entry.movie.id == movie.id)
+    });
+    watchlist.insert(
+        0,
+        WatchlistEntry {
+            movie: movie.clone(),
+            provider_type,
+            added_at,
+        },
+    );
+}
+
+/// Add a title to the watchlist, or move it to the front if it already exists.
+pub fn add_watchlist_entry(movie: &Movie, provider_type: usize) {
+    let mut watchlist = load_watchlist();
+    push_watchlist_entry(&mut watchlist, movie, provider_type, now_seconds());
+    write_watchlist(&watchlist);
+}
+
+pub fn is_in_watchlist(provider_type: usize, movie_id: &str) -> bool {
+    load_watchlist().iter().any(|entry| {
+        entry.provider_type == provider_type && entry.movie.id == movie_id
+    })
+}
+
+pub fn delete_watchlist_entry(provider_type: usize, movie_id: &str) {
+    let mut watchlist = load_watchlist();
+    let original_len = watchlist.len();
+    watchlist.retain(|entry| {
+        !(entry.provider_type == provider_type && entry.movie.id == movie_id)
+    });
+    if watchlist.len() != original_len {
+        write_watchlist(&watchlist);
+    }
+}
+
+pub fn clear_watchlist() {
+    write_watchlist(&[]);
 }
 
 // ─── Legacy wrappers (keep resume feature working) ───────────────────────────
@@ -932,6 +1012,30 @@ mod tests {
         assert!(!is_q_back("qu", true));
         assert!(!is_q_back("", true));
         assert!(!is_q_back("q", false));
+    }
+
+    #[test]
+    fn watchlist_upsert_moves_existing_title_to_front() {
+        let mut watchlist = Vec::new();
+        let first = Movie {
+            id: "first".into(),
+            title: "First".into(),
+            total_episodes: None,
+        };
+        let second = Movie {
+            id: "second".into(),
+            title: "Second".into(),
+            total_episodes: None,
+        };
+
+        push_watchlist_entry(&mut watchlist, &first, 0, 1);
+        push_watchlist_entry(&mut watchlist, &second, 0, 2);
+        push_watchlist_entry(&mut watchlist, &first, 0, 3);
+
+        assert_eq!(watchlist.len(), 2);
+        assert_eq!(watchlist[0].movie.id, "first");
+        assert_eq!(watchlist[0].added_at, 3);
+        assert_eq!(watchlist[1].movie.id, "second");
     }
 
     #[test]
