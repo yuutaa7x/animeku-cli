@@ -2,6 +2,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -314,6 +315,36 @@ fn partial_path(output: &Path) -> PathBuf {
     output.with_file_name(format!("{}.part.{}", stem, extension))
 }
 
+/// Newer ffmpeg versions split HLS extension validation into a separate
+/// `allowed_segment_extensions` option and enable `extension_picky` by default.
+/// Idlix disguises media segments as `.webp`, `.jpg`, `.js`, etc., so both
+/// checks have to be relaxed. Older ffmpeg versions only have the original
+/// `allowed_extensions` option; probing the demuxer help keeps this compatible.
+fn hls_extension_options() -> &'static [String] {
+    static OPTIONS: OnceLock<Vec<String>> = OnceLock::new();
+    OPTIONS.get_or_init(|| {
+        let Ok(output) = Command::new(crate::resolve_command_path("ffmpeg"))
+            .args(["-hide_banner", "-h", "demuxer=hls"])
+            .output()
+        else {
+            return Vec::new();
+        };
+        let help = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut options = Vec::new();
+        if help.contains("allowed_segment_extensions") {
+            options.extend(["-allowed_segment_extensions".to_string(), "ALL".to_string()]);
+        }
+        if help.contains("extension_picky") {
+            options.extend(["-extension_picky".to_string(), "0".to_string()]);
+        }
+        options
+    })
+}
+
 fn input_options(provider_type: usize, url: &str) -> Vec<String> {
     let is_hls = url.to_ascii_lowercase().contains(".m3u8");
     let is_remote = url.starts_with("http://") || url.starts_with("https://");
@@ -326,6 +357,7 @@ fn input_options(provider_type: usize, url: &str) -> Vec<String> {
             "-allowed_extensions".to_string(),
             "ALL".to_string(),
         ]);
+        options.extend(hls_extension_options().iter().cloned());
     }
 
     // HTTP protocol options are rejected when the input itself is a local
@@ -769,5 +801,134 @@ mod tests {
         assert!(options
             .iter()
             .any(|option| option.contains(otakudesu::OTAKUDESU_REFERER)));
+    }
+}
+
+#[cfg(test)]
+mod live_smoke_tests {
+    use super::*;
+    use crate::ext::Ext;
+
+    fn run_limited(command: Command, seconds: u32) -> std::process::Output {
+        let program = command.get_program().to_os_string();
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_os_string())
+            .collect::<Vec<_>>();
+        let seconds = seconds.to_string();
+        let mut limited = Command::new(program);
+        for arg in &args[..args.len() - 1] {
+            limited.arg(arg);
+        }
+        limited.args(["-t", &seconds]);
+        limited.arg(&args[args.len() - 1]);
+        limited.output().expect("ffmpeg should start")
+    }
+
+    fn assert_video_and_audio(path: &Path) {
+        let probe = Command::new(crate::resolve_command_path("ffprobe"))
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=index,codec_type,codec_name",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(path)
+            .output()
+            .expect("ffprobe should start");
+        assert!(
+            probe.status.success(),
+            "ffprobe failed: {}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+        let streams = String::from_utf8_lossy(&probe.stdout);
+        println!("{}", streams);
+        assert!(streams.lines().any(|line| line.ends_with(",video")));
+        assert!(streams.lines().any(|line| line.ends_with(",audio")));
+    }
+
+    #[test]
+    #[ignore = "live network + ffmpeg smoke test"]
+    fn live_idlix_download_smoke() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut provider = idlix::Idlix::new();
+            let (movies, _) = provider.search("A New Dawn".to_string(), 1).await.unwrap();
+            let movie = movies
+                .into_iter()
+                .find(|movie| movie.id.contains("a-new-dawn"))
+                .expect("A New Dawn should exist");
+            let (episodes, _) = provider.get_episodes(movie).await.unwrap();
+            let episode = episodes.into_iter().next().expect("episode should exist");
+            println!("Idlix episode: {} ({})", episode.title, episode.id);
+            let streams = provider.get_stream_urls(episode).await.unwrap();
+            for stream in &streams {
+                println!("  {} -> {}", stream.title, stream.url);
+            }
+            let stream = streams.last().expect("stream should exist");
+            let dir = std::env::temp_dir().join("animeku-live-test");
+            fs::create_dir_all(&dir).unwrap();
+            let output = dir.join("idlix-smoke.mkv");
+            let audio_path = util::temp_file("animeku_idlix_audio.m3u8");
+            let audio = Path::new(&audio_path)
+                .is_file()
+                .then_some(audio_path.as_str());
+            let command = build_ffmpeg_command(ext::PROVIDER_IDLIX, &stream.url, audio, &output);
+            let result = run_limited(command, 10);
+            assert!(
+                result.status.success(),
+                "ffmpeg failed: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert_video_and_audio(&output);
+            let subtitle = util::get_subtitle_path();
+            assert!(Path::new(&subtitle).is_file(), "subtitle should exist");
+        });
+    }
+
+    #[test]
+    #[ignore = "live network + ffmpeg smoke test"]
+    fn live_otakudesu_download_smoke() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut provider = otakudesu::Otakudesu::new();
+            let (movies, _) = provider
+                .search("Jujutsu Kaisen".to_string(), 1)
+                .await
+                .unwrap();
+            let movie = movies
+                .iter()
+                .find(|movie| movie.title.to_lowercase().contains("jujutsu kaisen"))
+                .cloned()
+                .or_else(|| movies.first().cloned())
+                .expect("Jujutsu Kaisen should exist");
+            let (episodes, _) = provider.get_episodes(movie).await.unwrap();
+            let episode = episodes.into_iter().next().expect("episode should exist");
+            println!("Otakudesu episode: {} ({})", episode.title, episode.id);
+            let streams = provider.get_stream_urls(episode).await.unwrap();
+            let dir = std::env::temp_dir().join("animeku-live-test");
+            fs::create_dir_all(&dir).unwrap();
+
+            for stream in &streams {
+                println!("Trying {} -> {}", stream.title, stream.url);
+                let output = dir.join("otakudesu-smoke.mp4");
+                let command =
+                    build_ffmpeg_command(ext::PROVIDER_OTAKUDESU, &stream.url, None, &output);
+                let result = run_limited(command, 10);
+                if result.status.success() {
+                    println!("OK: {}", stream.title);
+                    assert_video_and_audio(&output);
+                    return;
+                }
+                eprintln!(
+                    "FAILED {}: {}",
+                    stream.title,
+                    String::from_utf8_lossy(&result.stderr)
+                );
+            }
+            panic!("all Otakudesu streams failed");
+        });
     }
 }

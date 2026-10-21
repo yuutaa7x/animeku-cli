@@ -105,6 +105,12 @@ cargo uninstall animeku-cli
 
 ### Changelog
 
+#### v0.3.6 — Perbaikan download setelah validasi live (21 Oktober 2026)
+
+- Idlix: playlist HLS yang menyamarkan segmen sebagai `.webp`, `.jpg`, `.js`, `.css`, `.svg`, `.png`, atau `.html` sekarang bisa diunduh. ffmpeg versi baru memisahkan pengecekan `allowed_segment_extensions` dan mengaktifkan `extension_picky`; animeku-cli menyesuaikan opsi tersebut secara otomatis.
+- Otakudesu: halaman desustream versi baru yang membungkus pemutar Blogger sekarang di-resolve sampai URL `googlevideo`, sehingga download tidak lagi berhenti di halaman embed.
+- Menambahkan smoke test live (opt-in, `#[ignore]`) untuk memastikan video dan audio hasil download Idlix/Otakudesu benar-benar terbaca oleh `ffprobe`.
+
 #### v0.3.5 — Download episode dengan ffmpeg (21 Oktober 2026)
 
 - Aksi baru `[ ⬇ Download Episode Ini ]` di pemilih server/kualitas. Setelah itu muncul pemilih kualitas/server terpisah sebelum download dimulai.

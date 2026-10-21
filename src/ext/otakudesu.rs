@@ -45,14 +45,39 @@ impl Otakudesu {
         if !url.contains("desustream") {
             return clean_url(url);
         }
-        if let Ok(resp) = self.client.get(url).send().await {
-            if let Ok(text) = resp.text().await {
-                if let Some(extracted) = extract_desustream_url(&text) {
-                    return extracted;
+
+        let Ok(resp) = self.client.get(url).send().await else {
+            return clean_url(url);
+        };
+        let Ok(text) = resp.text().await else {
+            return clean_url(url);
+        };
+
+        let embed = extract_desustream_url(&text).or_else(|| extract_iframe_src(&text));
+        let Some(embed) = embed else {
+            return clean_url(url);
+        };
+
+        // Newer desustream pages wrap a Blogger video player instead of
+        // exposing the MP4 directly. Resolve that player to its googlevideo
+        // source so ffmpeg can download it.
+        if embed.contains("blogger.com/video.g") {
+            if let Ok(resp) = self
+                .client
+                .get(&embed)
+                .header("Referer", OTAKUDESU_REFERER)
+                .send()
+                .await
+            {
+                if let Ok(text) = resp.text().await {
+                    if let Some(video) = extract_blogger_video_url(&text) {
+                        return video;
+                    }
                 }
             }
         }
-        clean_url(url)
+
+        clean_url(&embed)
     }
 }
 
@@ -82,6 +107,70 @@ fn extract_desustream_url(text: &str) -> Option<String> {
         .or_else(|| extract_between(text, "otakudesu('{\"file\":\"", "\""))
         .or_else(|| extract_between(text, "\"file\":\"", "\""))
         .map(clean_url)
+}
+
+fn extract_iframe_src(text: &str) -> Option<String> {
+    let re = regex::Regex::new(r#"(?is)<iframe\b[^>]*\bsrc\s*=\s*["']([^"']+)["']"#).unwrap();
+    let mut url = clean_url(re.captures(text)?.get(1)?.as_str());
+    if url.starts_with("//") {
+        url = format!("https:{}", url);
+    }
+    Some(url)
+}
+
+fn unescape_js_string(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('u') => {
+                let hex = chars.by_ref().take(4).collect::<String>();
+                if hex.len() == 4 {
+                    if let Some(decoded) =
+                        u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)
+                    {
+                        out.push(decoded);
+                        continue;
+                    }
+                }
+                out.push('\\');
+                out.push('u');
+                out.push_str(&hex);
+            }
+            Some('x') => {
+                let hex = chars.by_ref().take(2).collect::<String>();
+                if hex.len() == 2 {
+                    if let Some(decoded) =
+                        u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)
+                    {
+                        out.push(decoded);
+                        continue;
+                    }
+                }
+                out.push('\\');
+                out.push('x');
+                out.push_str(&hex);
+            }
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+fn extract_blogger_video_url(text: &str) -> Option<String> {
+    let decoded = html_escape::decode_html_entities(text);
+    let re =
+        regex::Regex::new(r#"https://[^"<>\s]*googlevideo\.com/videoplayback[^"<>\s]*"#).unwrap();
+    re.find(&decoded)
+        .map(|found| clean_url(&unescape_js_string(found.as_str())))
 }
 
 #[async_trait]
@@ -348,6 +437,27 @@ mod tests {
             extract_desustream_url(html),
             Some(
                 "https://rr3.googlevideo.com/videoplayback?expire=1&sig=abc&lsig=def"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_extract_iframe_src() {
+        let html = r#"<iframe id="myIframe" src="https://www.blogger.com/video.g?token=abc" allowfullscreen></iframe>"#;
+        assert_eq!(
+            extract_iframe_src(html),
+            Some("https://www.blogger.com/video.g?token=abc".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_blogger_video_url_unescapes_js_string() {
+        let html = r#"[[&quot;https://rr1---sn.example.googlevideo.com/videoplayback?expire\u003d1\u0026sig\u003dabc&quot;,[18]]]"#;
+        assert_eq!(
+            extract_blogger_video_url(html),
+            Some(
+                "https://rr1---sn.example.googlevideo.com/videoplayback?expire=1&sig=abc"
                     .to_string()
             )
         );
