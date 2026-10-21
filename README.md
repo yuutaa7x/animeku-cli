@@ -32,6 +32,8 @@ Buka **PowerShell** atau **CMD** lalu jalankan perintah berikut:
 powershell -c "irm https://raw.githubusercontent.com/yuutaa7x/animeku-cli/refs/heads/main/install.bat -OutFile install.bat; .\install.bat"
 ```
 
+Installer Windows akan mencoba mengunduh binary rilis terbaru terlebih dahulu. Jika rilis belum tersedia, installer otomatis fallback ke build dari source.
+
 #### Auto Install (Linux / macOS — satu baris)
 
 Buka terminal lalu jalankan:
@@ -129,6 +131,8 @@ cargo uninstall animeku-cli
 - Download episode maupun batch bisa dibatalkan dengan `Esc`, `q`, atau `Ctrl+C`. ffmpeg langsung dihentikan, file `.part` dihapus, dan batch berhenti tanpa melanjutkan episode berikutnya.
 - Saat batch dibatalkan, ringkasan parsial menampilkan jumlah episode yang sudah diproses dan berapa yang belum diproses, lalu kembali ke pemilih episode.
 - Retry per episode tetap berjalan, tetapi pembatalan tidak memicu retry dan tidak meninggalkan file setengah jadi.
+- Installer Windows kini memakai binary rilis terbaru bila tersedia, sehingga tidak perlu compile Rust/GCC dari source. Jika belum ada rilis, installer tetap fallback ke build dari source.
+- Memperbaiki pesan `Installation failed` palsu setelah instalasi sukses, yang disebabkan karakter `)` dan `!` di dalam blok `if` pada batch installer.
 
 #### v0.3.7 — Download batch episode (21 Oktober 2026)
 

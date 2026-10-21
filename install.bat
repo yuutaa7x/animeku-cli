@@ -8,6 +8,10 @@ echo    animeku-cli Auto Installer for Windows
 echo  =====================================================
 echo.
 
+:: ---- FAST PATH: Try the prebuilt Windows binary first ----
+call :try_prebuilt
+if "!PREBUILT_OK!"=="1" goto :deps
+
 :: ---- STEP 1: Check / Install Rust ----
 where cargo >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
@@ -144,56 +148,112 @@ echo.
 
 :: ---- STEP 4: Install animeku-cli ----
 :install
-echo [4/4] Installing animeku-cli...
+echo [4/4] Installing animeku-cli from source...
 echo.
 
-cargo install --git https://github.com/yuutaa7x/animeku-cli
-
-if %ERRORLEVEL% EQU 0 (
-    if exist "%USERPROFILE%\.cargo\bin\animeku-cli.exe" (
-        copy /y "%USERPROFILE%\.cargo\bin\animeku-cli.exe" "%USERPROFILE%\.cargo\bin\animeku.exe" >nul 2>&1
-    )
-
-    where mpv >nul 2>&1
-    if !ERRORLEVEL! NEQ 0 (
-        if exist "%ProgramFiles%\MPV Player\mpv.exe" (
-            echo [INFO] MPV player is already installed at %ProgramFiles%\MPV Player\mpv.exe
-        ) else (
-            echo.
-            echo [INFO] MPV player is not installed yet.
-            where winget >nul 2>&1
-            if !ERRORLEVEL! EQU 0 (
-                echo [INFO] Installing MPV automatically via winget...
-                winget install --id shinchiro.mpv -e --source winget --accept-package-agreements --accept-source-agreements
-            ) else (
-                echo [INFO] Please install MPV from https://mpv.io/installation/
-            )
-        )
-    )
-
-    where ffmpeg >nul 2>&1
-    if !ERRORLEVEL! NEQ 0 (
-        echo.
-        echo [INFO] ffmpeg is not installed yet. Episode download requires it.
-        where winget >nul 2>&1
-        if !ERRORLEVEL! EQU 0 (
-            echo [INFO] Installing ffmpeg automatically via winget...
-            winget install --id Gyan.FFmpeg -e --source winget --accept-package-agreements --accept-source-agreements
-        ) else (
-            echo [INFO] Please install ffmpeg from https://ffmpeg.org/download.html
-        )
-    )
-
-    echo.
-    echo  =====================================================
-    echo    SUCCESS! animeku-cli installed!
-    echo    Run it with: animeku  (or animeku-cli)
-    echo  =====================================================
-) else (
+cargo install --git https://github.com/yuutaa7x/animeku-cli --locked
+if %ERRORLEVEL% NEQ 0 (
     echo.
     echo  [ERROR] Installation failed. Check errors above.
+    pause
+    exit /b 1
+)
+if exist "%USERPROFILE%\.cargo\bin\animeku-cli.exe" (
+    copy /y "%USERPROFILE%\.cargo\bin\animeku-cli.exe" "%USERPROFILE%\.cargo\bin\animeku.exe" >nul 2>&1
+)
+goto :deps
+
+:deps
+where mpv >nul 2>&1
+if !ERRORLEVEL! NEQ 0 (
+    if exist "%ProgramFiles%\MPV Player\mpv.exe" (
+        echo [INFO] MPV player is already installed at %ProgramFiles%\MPV Player\mpv.exe
+    ) else (
+        echo.
+        echo [INFO] MPV player is not installed yet.
+        where winget >nul 2>&1
+        if !ERRORLEVEL! EQU 0 (
+            echo [INFO] Installing MPV automatically via winget...
+            winget install --id shinchiro.mpv -e --source winget --accept-package-agreements --accept-source-agreements
+        ) else (
+            echo [INFO] Please install MPV from https://mpv.io/installation/
+        )
+    )
+)
+
+where ffmpeg >nul 2>&1
+if !ERRORLEVEL! NEQ 0 (
+    echo.
+    echo [INFO] ffmpeg is not installed yet. Episode download requires it.
+    where winget >nul 2>&1
+    if !ERRORLEVEL! EQU 0 (
+        echo [INFO] Installing ffmpeg automatically via winget...
+        winget install --id Gyan.FFmpeg -e --source winget --accept-package-agreements --accept-source-agreements
+    ) else (
+        echo [INFO] Please install ffmpeg from https://ffmpeg.org/download.html
+    )
 )
 
 echo.
+echo  =====================================================
+echo    SUCCESS - animeku-cli installed
+echo    Run it with: animeku or animeku-cli
+echo  =====================================================
+echo.
 pause
 endlocal
+exit /b 0
+
+:: ---- FAST PATH: Prebuilt Windows binary ----
+:try_prebuilt
+set "PREBUILT_OK=0"
+set "ANIMEKU_URL=https://github.com/yuutaa7x/animeku-cli/releases/latest/download/animeku-cli-windows-x86_64.exe"
+echo [INFO] Checking prebuilt binary...
+where powershell >nul 2>&1
+if %ERRORLEVEL% NEQ 0 (
+    echo [INFO] PowerShell not found. Falling back to source build.
+    exit /b 0
+)
+
+echo [INFO] Downloading prebuilt binary...
+curl -fL -# -o "%TEMP%\animeku-cli.exe" "!ANIMEKU_URL!"
+if !ERRORLEVEL! NEQ 0 (
+    echo [INFO] No prebuilt release found. Falling back to source build.
+    del /q "%TEMP%\animeku-cli.exe" >nul 2>&1
+    exit /b 0
+)
+if not exist "%TEMP%\animeku-cli.exe" (
+    echo [WARN] Download failed. Falling back to source build.
+    exit /b 0
+)
+
+:: Verify the checksum when the release provides one.
+curl -fsSL -o "%TEMP%\animeku-cli.exe.sha256" "!ANIMEKU_URL!.sha256" >nul 2>&1
+if not exist "%TEMP%\animeku-cli.exe.sha256" goto :prebuilt_install
+call :verify_prebuilt_checksum
+if !ERRORLEVEL! NEQ 0 (
+    echo [WARN] Checksum mismatch. Falling back to source build.
+    del /q "%TEMP%\animeku-cli.exe" "%TEMP%\animeku-cli.exe.sha256" >nul 2>&1
+    exit /b 0
+)
+
+:prebuilt_install
+if not exist "%USERPROFILE%\.cargo\bin" mkdir "%USERPROFILE%\.cargo\bin"
+move /y "%TEMP%\animeku-cli.exe" "%USERPROFILE%\.cargo\bin\animeku-cli.exe" >nul
+if !ERRORLEVEL! NEQ 0 (
+    echo [WARN] Could not replace animeku-cli.exe. Close any running animeku-cli and rerun the installer.
+    exit /b 0
+)
+copy /y "%USERPROFILE%\.cargo\bin\animeku-cli.exe" "%USERPROFILE%\.cargo\bin\animeku.exe" >nul 2>&1
+
+:: Make sure the install directory is available in new terminals.
+powershell -NoProfile -Command "$p=[Environment]::GetEnvironmentVariable('PATH','User'); if($p -notlike '*\.cargo\bin*'){[Environment]::SetEnvironmentVariable('PATH',$p+';%USERPROFILE%\.cargo\bin','User')}"
+set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
+
+set "PREBUILT_OK=1"
+echo [OK] Prebuilt binary installed.
+exit /b 0
+
+:verify_prebuilt_checksum
+powershell -NoProfile -Command "$expected=(Get-Content '%TEMP%\animeku-cli.exe.sha256' -Raw).Split()[0].ToLower(); $actual=(Get-FileHash '%TEMP%\animeku-cli.exe' -Algorithm SHA256).Hash.ToLower(); if ($actual -ne $expected) { exit 1 }"
+exit /b %ERRORLEVEL%
