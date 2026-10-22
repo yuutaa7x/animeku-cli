@@ -1162,16 +1162,20 @@ fn confirm_next_episode(next_ep: &crate::models::Episode) -> anyhow::Result<bool
     match config::Config::load().auto_next {
         config::AutoNext::Always => Ok(true),
         config::AutoNext::Never => Ok(false),
-        config::AutoNext::Ask => Ok(dialoguer::Confirm::with_theme(&crate::util::custom_theme())
-            .with_prompt(format!(
-                "Lanjut ke {}? (Esc = tidak)",
+        config::AutoNext::Ask => {
+            println!(
+                "{} Berikutnya: {}",
+                "▸".cyan(),
                 next_ep.title.trim()
-            ))
-            .default(true)
-            // Sembunyikan hint "yes" bawaan dialoguer; Enter tetap berarti ya.
-            .show_default(false)
-            .interact_opt()?
-            .unwrap_or(false)),
+            );
+            Ok(dialoguer::Confirm::with_theme(&crate::util::custom_theme())
+                .with_prompt("Lanjut ke episode berikutnya? (Esc = tidak)")
+                .default(true)
+                // Sembunyikan hint "yes" bawaan dialoguer; Enter tetap berarti ya.
+                .show_default(false)
+                .interact_opt()?
+                .unwrap_or(false))
+        }
     }
 }
 
@@ -1850,6 +1854,8 @@ fn show_main_menu() -> anyhow::Result<Option<MainAction>> {
 }
 
 fn confirm_action(prompt: &str) -> anyhow::Result<bool> {
+    // dialoguer clears only one terminal line, so keep the prompt unwrapped.
+    let prompt = crate::util::fit_prompt(prompt);
     Ok(dialoguer::Confirm::with_theme(&crate::util::custom_theme())
         .with_prompt(prompt)
         .default(false)
@@ -2740,11 +2746,12 @@ async fn handle_watchlist_download_new(
         return Ok(());
     };
 
-    if !confirm_action(&format!(
-        "Download {} episode baru ke '{}'?",
-        new_episodes.len(),
-        directory.display()
-    ))? {
+    println!();
+    println!("{} Ringkasan download episode baru:", "◆".blue());
+    println!("  Jumlah  : {} episode", new_episodes.len());
+    println!("  Kualitas: {}", stream.title.cyan());
+    println!("  Folder  : {}", directory.display());
+    if !confirm_action("Mulai download episode baru?")? {
         return Ok(());
     }
 

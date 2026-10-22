@@ -1701,13 +1701,17 @@ impl AnimekuCli {
             return Ok(false);
         };
 
-        if !crate::confirm_action(&format!(
-            "Download {} episode ({} s/d {}) ke '{}'?",
+        println!();
+        println!("{} Ringkasan batch download:", "◆".blue());
+        println!(
+            "  Episode  : {} ({} s/d {})",
             count,
             episodes[start].title.trim(),
-            episodes[end].title.trim(),
-            directory.display()
-        ))? {
+            episodes[end].title.trim()
+        );
+        println!("  Kualitas : {}", target_title.cyan());
+        println!("  Folder   : {}", directory.display());
+        if !crate::confirm_action("Mulai download batch?")? {
             return Ok(false);
         }
 

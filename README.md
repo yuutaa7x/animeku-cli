@@ -158,6 +158,14 @@ Untuk Windows, hapus `animeku-cli.exe` dan `animeku.exe` dari `%USERPROFILE%\.ca
 
 ### Changelog
 
+#### v0.5.1 — Perbaikan prompt konfirmasi panjang (22 Oktober 2026)
+
+- Prompt konfirmasi sekarang dipotong agar tetap satu baris di terminal sempit, mencegah sisa karakter nyangkut di depan baris `✔` setelah dialog selesai.
+- Ringkasan batch download (rentang episode, kualitas, folder) ditampilkan terpisah sebelum pertanyaan singkat **Mulai download batch?**.
+- Konfirmasi timpa file dan download episode baru juga memakai ringkasan terpisah agar path panjang tidak merusak tampilan.
+- Prompt auto-next menampilkan judul episode berikutnya di baris sendiri, lalu pertanyaan singkat.
+- Test baru untuk pemotongan prompt panjang dan prompt pendek. Total 103 test (96 aktif, 7 live/network opsional).
+
 #### v0.5.0 — Lanjut tontonan, kelola download, discovery & onboarding (22 Oktober 2026)
 
 - **Lanjutkan Tontonan** sekarang meneruskan ke episode berikutnya bila episode terakhir sudah tamat, bukan memutar ulang episode yang sama. Label menu utama ikut menampilkan status ini.

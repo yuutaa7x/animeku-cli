@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use colored::Colorize;
-use dialoguer::{console::Style, theme::ColorfulTheme};
+use dialoguer::{
+    console::{truncate_str, Style, Term},
+    theme::ColorfulTheme,
+};
 
 /// Print a single loading line before waiting for `future`.
 ///
@@ -28,6 +31,21 @@ pub fn custom_theme() -> ColorfulTheme {
         hint_style: Style::new().cyan(),
         ..Default::default()
     }
+}
+
+/// Keep dialoguer prompts on a single terminal line. `dialoguer` clears only
+/// the current line after a prompt, so a wrapped prompt leaves fragments behind
+/// (for example a stray character before the final `✔` line).
+pub fn fit_prompt(prompt: &str) -> String {
+    let (_rows, columns) = Term::stderr().size();
+    fit_prompt_to_width(prompt, columns as usize)
+}
+
+fn fit_prompt_to_width(prompt: &str, columns: usize) -> String {
+    // Leave room for the `? ` prefix and the `· yes/no` suffix added by the
+    // ColorfulTheme.
+    let width = columns.saturating_sub(10).max(12);
+    truncate_str(prompt, width, "…").into_owned()
 }
 
 /// Private per-user directory for cookies, playlists, subtitles and logs.
@@ -217,4 +235,23 @@ pub fn clearscreen_and_show_banner() -> anyhow::Result<()> {
         version
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dialoguer::console::measure_text_width;
+
+    #[test]
+    fn long_prompts_are_truncated_to_one_terminal_line() {
+        let prompt = "Download 6 episode (S1E01 - To You in 2016 s/d S1E06 - To All of You in 2016) ke '/home/yuu/dow/Animeku-CLI/Takopi'?";
+        let fitted = fit_prompt_to_width(prompt, 40);
+        assert!(measure_text_width(&fitted) <= 30);
+        assert!(fitted.ends_with('…'));
+    }
+
+    #[test]
+    fn short_prompts_are_left_unchanged() {
+        assert_eq!(fit_prompt_to_width("Timpa file?", 80), "Timpa file?");
+    }
 }

@@ -153,10 +153,13 @@ pub fn download_stream(
             continue;
         }
         if output_path.exists() {
-            if crate::confirm_action(&format!(
-                "File '{}' sudah ada. Timpa?",
+            println!();
+            println!(
+                "{} File sudah ada: {}",
+                "⚠".yellow(),
                 output_path.display()
-            ))? {
+            );
+            if crate::confirm_action("Timpa file yang sudah ada?")? {
                 break (directory, output_path);
             }
             continue;
