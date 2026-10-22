@@ -32,7 +32,7 @@ dependencies = [
 
 [[package]]
 name = "animeku-cli"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -48,6 +48,7 @@ dependencies = [
  "html-escape",
  "humansize",
  "image",
+ "libc",
  "once_cell",
  "open",
  "regex",

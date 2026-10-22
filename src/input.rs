@@ -472,9 +472,16 @@ pub async fn get_user_input() -> anyhow::Result<Option<Input>> {
         // Build items: first option is always "new search", rest are history.
         // A custom menu is used here so q + Enter can return instead of being
         // swallowed by a filter input.
-        let mut entries = Vec::with_capacity(history.len() + 1);
+        let mut entries = Vec::with_capacity(history.len() + 4);
         entries.push(MenuEntry::new(NEW_SEARCH_LABEL));
         entries.extend(history.iter().cloned().map(MenuEntry::new));
+        entries.push(MenuEntry::separator(
+            "─── Aksi ─────────────────────────────────────",
+        ));
+        let clear_index = entries.len();
+        entries.push(MenuEntry::new("Hapus Riwayat Pencarian"));
+        let back_index = entries.len();
+        entries.push(MenuEntry::new("Kembali"));
 
         let selection = select_menu_q_back(
             "Cari anime / film (q+Enter kembali, ketik untuk filter riwayat):",
@@ -497,6 +504,19 @@ pub async fn get_user_input() -> anyhow::Result<Option<Input>> {
                     _ => continue,
                 }
             }
+            Some(index) if index == clear_index => {
+                let confirmed = dialoguer::Confirm::with_theme(&crate::util::custom_theme())
+                    .with_prompt("Hapus semua riwayat pencarian?")
+                    .default(false)
+                    .interact_opt()?
+                    .unwrap_or(false);
+                if confirmed {
+                    clear_search_history();
+                    clear_search_providers();
+                }
+                continue;
+            }
+            Some(index) if index == back_index || index > history.len() => return Ok(None),
             Some(idx) => {
                 // History item chosen directly
                 (history[idx - 1].clone(), false)
@@ -555,6 +575,17 @@ pub fn choice<T: std::fmt::Display + Clone>(
         MenuResult::Selected(index) => Ok(options.get(index).cloned()),
         _ => Ok(None),
     }
+}
+
+/// Recovery prompt used after a provider failure. Returning `true` retries the
+/// same operation without dropping the user back to the main menu.
+pub fn retry_or_back(prompt: &str) -> anyhow::Result<bool> {
+    let entries = vec![
+        MenuEntry::new("Coba lagi"),
+        MenuEntry::new("Kembali"),
+    ];
+    Ok(select_menu_simple(prompt, &entries, 0)?
+        .is_some_and(|index| index == 0))
 }
 
 // ─── Menu with non-selectable separators ─────────────────────────────────────

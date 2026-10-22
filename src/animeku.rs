@@ -1,5 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 use colored::Colorize;
@@ -211,17 +215,21 @@ fn best_episode_match(target: &Episode, candidates: &[Episode]) -> Option<Episod
 
 fn notify_fallback(from: usize, to: usize, reason: &str) {
     eprintln!(
-        "{} {} gagal: {}",
+        "{} {} bermasalah: {}",
         "⚠".yellow(),
         ext::provider_name(from),
         reason.trim()
     );
-    eprintln!("{} Mencoba {}...", "◆".cyan(), ext::provider_name(to));
+    eprintln!(
+        "  {} Ini bukan error fatal. animeku-cli mencoba {} sebagai cadangan dan mencocokkan judul/episode.",
+        "ℹ".blue(),
+        ext::provider_name(to).cyan()
+    );
 }
 
 fn notify_fallback_success(to: usize) {
     eprintln!(
-        "{} Beralih ke {}",
+        "{} Beralih ke {}. ID judul/episode sudah disesuaikan.",
         "✓".green(),
         ext::provider_name(to).green()
     );
@@ -1040,51 +1048,47 @@ impl AnimekuCli {
             if let std::collections::hash_map::Entry::Vacant(_) =
                 self.movie_cache.entry(page_key.clone())
             {
-                let spinner_message = format!("Mencari '{}'...", search_title);
-                let result = crate::util::with_spinner(
-                    spinner_message,
-                    retry_search(self.extractor.as_mut(), search_title, page),
-                )
-                .await;
-                let (movie_list, total_pages) = match result {
-                    Ok((movies, total)) if !movies.is_empty() || page != 1 => {
-                        (movies, total)
-                    }
-                    Ok((movies, total)) => {
-                        match self
-                            .try_search_fallback(search_title, "tidak ada hasil")
-                            .await
-                        {
-                            Some(result) => result,
-                            None => (movies, total),
+                let (movie_list, total_pages) = loop {
+                    let spinner_message = format!("Mencari '{}'...", search_title);
+                    let result = crate::util::with_spinner(
+                        spinner_message,
+                        retry_search(self.extractor.as_mut(), search_title, page),
+                    )
+                    .await;
+                    match result {
+                        Ok((movies, total)) if !movies.is_empty() || page != 1 => {
+                            break (movies, total);
                         }
-                    }
-                    Err(error) => {
-                        if page == 1 {
-                            if let Some(result) = self
-                                .try_search_fallback(
-                                    search_title,
-                                    &format!("{:#}", error),
-                                )
+                        Ok((movies, total)) => {
+                            match self
+                                .try_search_fallback(search_title, "tidak ada hasil")
                                 .await
                             {
-                                result
-                            } else {
-                                eprintln!(
-                                    "{} Gagal mencari '{}' di {}: {:#}",
-                                    "■".red(),
-                                    search_title,
-                                    ext::provider_name(self.provider_type),
-                                    error
-                                );
-                                println!();
-                                println!("Periksa koneksi internet lalu coba lagi.");
-                                println!("Tekan Enter untuk kembali...");
-                                let mut dummy = String::new();
-                                let _ = std::io::stdin().read_line(&mut dummy);
-                                return Ok(None);
+                                Some(result) => break result,
+                                None => {
+                                    if page == 1 {
+                                        println!();
+                                        println!(
+                                            "Provider tidak menemukan hasil. Periksa ejaan judul atau coba provider lain."
+                                        );
+                                        if input::retry_or_back("Coba pencarian lagi?")? {
+                                            continue;
+                                        }
+                                        return Ok(None);
+                                    }
+                                    break (movies, total);
+                                }
                             }
-                        } else {
+                        }
+                        Err(error) => {
+                            if page == 1 {
+                                if let Some(result) = self
+                                    .try_search_fallback(search_title, &format!("{:#}", error))
+                                    .await
+                                {
+                                    break result;
+                                }
+                            }
                             eprintln!(
                                 "{} Gagal mencari '{}' di {}: {:#}",
                                 "■".red(),
@@ -1094,9 +1098,9 @@ impl AnimekuCli {
                             );
                             println!();
                             println!("Periksa koneksi internet lalu coba lagi.");
-                            println!("Tekan Enter untuk kembali...");
-                            let mut dummy = String::new();
-                            let _ = std::io::stdin().read_line(&mut dummy);
+                            if input::retry_or_back("Coba lagi tanpa keluar aplikasi?")? {
+                                continue;
+                            }
                             return Ok(None);
                         }
                     }
@@ -1220,43 +1224,48 @@ impl AnimekuCli {
         let provider = self.provider_type;
         let mut from_cache = false;
 
-        let (episodes, meta) = if let Some(cached) = self.episode_cache.get(&id) {
-            from_cache = true;
-            cached.clone()
-        } else if let Some(cached) = self.cached_episodes(provider, &id) {
-            from_cache = true;
-            self.episode_cache.insert(id.clone(), cached.clone());
-            cached
-        } else {
+        let (episodes, meta) = loop {
+            if let Some(cached) = self.episode_cache.get(&id) {
+                from_cache = true;
+                break cached.clone();
+            }
+            if let Some(cached) = self.cached_episodes(provider, &id) {
+                from_cache = true;
+                self.episode_cache.insert(id.clone(), cached.clone());
+                break cached;
+            }
+
             let result = crate::util::with_spinner(
-                spinner_message,
+                spinner_message.clone(),
                 retry_episodes(self.extractor.as_ref(), &movie),
             )
             .await;
 
             match result {
                 Ok(item) if !item.0.is_empty() => {
-                    self.remember_episodes(
-                        provider,
-                        &id,
-                        item.0.clone(),
-                        item.1.clone(),
-                    );
+                    self.remember_episodes(provider, &id, item.0.clone(), item.1.clone());
                     self.episode_cache.insert(id.clone(), item.clone());
-                    item
+                    break item;
                 }
-                Ok(item) => match self
+                Ok(_) => match self
                     .try_fallback_episodes(&movie, "daftar episode kosong")
                     .await
                 {
-                    Some(fallback) => fallback,
-                    None => item,
+                    Some(fallback) => break fallback,
+                    None => {
+                        println!();
+                        println!("Provider tidak memiliki daftar episode yang bisa dipakai.");
+                        if input::retry_or_back("Coba muat episode lagi?")? {
+                            continue;
+                        }
+                        return Ok(None);
+                    }
                 },
                 Err(error) => match self
                     .try_fallback_episodes(&movie, &format!("{:#}", error))
                     .await
                 {
-                    Some(fallback) => fallback,
+                    Some(fallback) => break fallback,
                     None => {
                         eprintln!(
                             "{} Gagal memuat episode dari {}: {:#}",
@@ -1265,9 +1274,9 @@ impl AnimekuCli {
                             error
                         );
                         println!();
-                        println!("Tekan Enter untuk kembali ke daftar judul...");
-                        let mut dummy = String::new();
-                        let _ = std::io::stdin().read_line(&mut dummy);
+                        if input::retry_or_back("Coba lagi tanpa keluar aplikasi?")? {
+                            continue;
+                        }
                         return Ok(None);
                     }
                 },
@@ -1401,6 +1410,7 @@ impl AnimekuCli {
         target_title: &str,
         directory: &Path,
         existing: crate::download::ExistingFilePolicy,
+        pause: Arc<AtomicBool>,
     ) -> BatchItemOutcome {
         let streams = match retry_streams(self.extractor.as_ref(), episode).await {
             Ok(streams) if !streams.is_empty() => streams,
@@ -1456,7 +1466,12 @@ impl AnimekuCli {
         }
 
         for attempt in 1..=BATCH_DOWNLOAD_ATTEMPTS {
-            match crate::download::download_to_path(self.provider_type, stream, &output) {
+            match crate::download::download_to_path_with_pause(
+                self.provider_type,
+                stream,
+                &output,
+                Arc::clone(&pause),
+            ) {
                 Ok(crate::download::DownloadResult::Completed) => {
                     return BatchItemOutcome::Completed;
                 }
@@ -1505,6 +1520,10 @@ impl AnimekuCli {
         let already_done = total.saturating_sub(pending.len());
         let mut processed = 0usize;
         let mut cancelled = false;
+        let mut paused = false;
+        // Shared with ffmpeg's input listener. `p` pauses on Unix and always
+        // stops the queue after the current episode.
+        let pause = Arc::new(AtomicBool::new(false));
 
         for index in pending {
             let episode = queue.episodes[index].clone();
@@ -1523,6 +1542,7 @@ impl AnimekuCli {
                     &queue.target_quality,
                     &directory,
                     queue.existing,
+                    Arc::clone(&pause),
                 )
                 .await;
 
@@ -1557,6 +1577,11 @@ impl AnimekuCli {
                     started,
                 );
             }
+
+            if pause.load(Ordering::SeqCst) {
+                paused = true;
+                break;
+            }
         }
 
         let elapsed = started.elapsed().as_secs();
@@ -1574,6 +1599,20 @@ impl AnimekuCli {
             println!(
                 "  Antrean disimpan. Pilih menu 'Lanjutkan Batch' untuk melanjutkan nanti."
             );
+        } else if paused {
+            println!(
+                "\n{} Batch dijeda: {} berhasil • {} dilewati • {} gagal • {} tertunda ({}).",
+                "■".yellow(),
+                completed,
+                skipped,
+                failed,
+                remaining_count,
+                crate::models::format_seconds(elapsed)
+            );
+            println!(
+                "  Antrean disimpan. Pilih menu 'Kelola Download' → 'Lanjutkan' untuk melanjutkan."
+            );
+            let _ = queue.save();
         } else if remaining_count == 0 {
             println!(
                 "\n{} Batch selesai: {} berhasil • {} dilewati • {} gagal • total {}.",
@@ -1711,23 +1750,32 @@ impl AnimekuCli {
             self.stream_cache.get(&id).cloned()
         };
 
-        let streams = if let Some(cached) = cached {
-            cached
-        } else {
+        let streams = loop {
+            if let Some(cached) = cached.clone() {
+                break cached;
+            }
+
             let result = crate::util::with_spinner(
-                spinner_message,
+                spinner_message.clone(),
                 retry_streams(self.extractor.as_ref(), &episode),
             )
             .await;
 
             let streams = match result {
                 Ok(streams) if !streams.is_empty() => streams,
-                Ok(streams) => match self
+                Ok(_) => match self
                     .try_fallback_streams(&episode, "server stream kosong")
                     .await
                 {
                     Some(fallback) => fallback,
-                    None => streams,
+                    None => {
+                        println!();
+                        println!("Server stream kosong atau sedang offline.");
+                        if input::retry_or_back("Coba muat stream lagi?")? {
+                            continue;
+                        }
+                        return Ok(None);
+                    }
                 },
                 Err(error) => match self
                     .try_fallback_streams(&episode, &format!("{:#}", error))
@@ -1742,9 +1790,9 @@ impl AnimekuCli {
                             error
                         );
                         println!();
-                        println!("Tekan Enter untuk kembali...");
-                        let mut dummy = String::new();
-                        let _ = std::io::stdin().read_line(&mut dummy);
+                        if input::retry_or_back("Coba lagi tanpa keluar aplikasi?")? {
+                            continue;
+                        }
                         return Ok(None);
                     }
                 },
@@ -1759,7 +1807,7 @@ impl AnimekuCli {
             {
                 self.stream_cache.insert(id.clone(), streams.clone());
             }
-            streams
+            break streams;
         };
 
         if streams.is_empty() {

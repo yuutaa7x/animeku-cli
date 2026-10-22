@@ -70,12 +70,92 @@ pub async fn trending(per_page: usize) -> Result<Vec<MediaInfo>> {
         "query ($perPage: Int) {{ Page(page: 1, perPage: $perPage) {{ media(type: ANIME, sort: TRENDING_DESC) {{ {MEDIA_FIELDS} }} }} }}"
     );
     let json = request(&query, json!({ "perPage": per_page.clamp(1, 30) })).await?;
-    let media = json
-        .pointer("/data/Page/media")
+    Ok(parse_media_page(&json))
+}
+
+pub async fn seasonal(season: &str, year: i64, per_page: usize) -> Result<Vec<MediaInfo>> {
+    let query = format!(
+        "query ($season: MediaSeason, $year: Int, $perPage: Int) {{ Page(page: 1, perPage: $perPage) {{ media(type: ANIME, season: $season, seasonYear: $year, sort: POPULARITY_DESC) {{ {MEDIA_FIELDS} }} }} }}"
+    );
+    let json = request(
+        &query,
+        json!({
+            "season": season,
+            "year": year,
+            "perPage": per_page.clamp(1, 30),
+        }),
+    )
+    .await?;
+    Ok(parse_media_page(&json))
+}
+
+pub async fn by_genre(genre: &str, per_page: usize) -> Result<Vec<MediaInfo>> {
+    let query = format!(
+        "query ($genre: String, $perPage: Int) {{ Page(page: 1, perPage: $perPage) {{ media(type: ANIME, genre: $genre, sort: POPULARITY_DESC) {{ {MEDIA_FIELDS} }} }} }}"
+    );
+    let json = request(
+        &query,
+        json!({ "genre": genre, "perPage": per_page.clamp(1, 30) }),
+    )
+    .await?;
+    Ok(parse_media_page(&json))
+}
+
+pub const GENRES: &[&str] = &[
+    "Action",
+    "Adventure",
+    "Comedy",
+    "Drama",
+    "Fantasy",
+    "Horror",
+    "Mystery",
+    "Romance",
+    "Sci-Fi",
+    "Slice of Life",
+    "Sports",
+    "Supernatural",
+    "Thriller",
+];
+
+pub fn season_for_month(month: u32) -> &'static str {
+    match month {
+        1..=3 => "WINTER",
+        4..=6 => "SPRING",
+        7..=9 => "SUMMER",
+        _ => "FALL",
+    }
+}
+
+/// Current AniList season and year, derived without a date-time dependency.
+pub fn current_season() -> (&'static str, i64) {
+    let (year, month) = current_year_month();
+    (season_for_month(month), year)
+}
+
+fn current_year_month() -> (i64, u32) {
+    let days = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        / 86_400;
+    // Howard Hinnant's civil-from-days algorithm.
+    let z = days as i64 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    (year, month as u32)
+}
+
+fn parse_media_page(json: &Value) -> Vec<MediaInfo> {
+    json.pointer("/data/Page/media")
         .and_then(Value::as_array)
         .map(|items| items.iter().filter_map(parse_media).collect())
-        .unwrap_or_default();
-    Ok(media)
+        .unwrap_or_default()
 }
 
 fn parse_media(value: &Value) -> Option<MediaInfo> {
@@ -229,6 +309,21 @@ mod tests {
         assert_eq!(info.episodes, Some(28));
         assert_eq!(info.genres, vec!["Adventure", "Fantasy"]);
         assert_eq!(info.description.as_deref(), Some("Fantasy journey"));
+    }
+
+    #[test]
+    fn season_mapping_covers_the_whole_year() {
+        assert_eq!(season_for_month(1), "WINTER");
+        assert_eq!(season_for_month(3), "WINTER");
+        assert_eq!(season_for_month(4), "SPRING");
+        assert_eq!(season_for_month(6), "SPRING");
+        assert_eq!(season_for_month(7), "SUMMER");
+        assert_eq!(season_for_month(9), "SUMMER");
+        assert_eq!(season_for_month(10), "FALL");
+        assert_eq!(season_for_month(12), "FALL");
+        let (season, year) = current_season();
+        assert!(!season.is_empty());
+        assert!(year >= 2020);
     }
 
     #[test]

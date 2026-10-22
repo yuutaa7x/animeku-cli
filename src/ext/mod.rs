@@ -111,6 +111,28 @@ pub fn make_extractor(provider_type: usize) -> Box<dyn Ext> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ProviderHealth {
+    pub latency: Duration,
+    pub results: usize,
+}
+
+/// Lightweight connectivity probe used by the health screen. It deliberately
+/// performs a normal small search so the result reflects the same path the app
+/// uses for real requests, including rate limiting and provider parsing.
+pub async fn check_provider_health(provider_type: usize) -> anyhow::Result<ProviderHealth> {
+    let mut extractor = make_extractor(provider_type);
+    let started = Instant::now();
+    let (movies, _) = extractor.search("one piece".to_string(), 1).await?;
+    if movies.is_empty() {
+        anyhow::bail!("tidak ada hasil uji dari provider");
+    }
+    Ok(ProviderHealth {
+        latency: started.elapsed(),
+        results: movies.len(),
+    })
+}
+
 #[async_trait]
 #[allow(clippy::double_must_use)] // false positive from the async_trait expansion
 pub trait Ext {

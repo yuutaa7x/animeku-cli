@@ -18,6 +18,26 @@ pub enum BatchItemStatus {
     Failed,
 }
 
+impl BatchItemStatus {
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::Pending => "○",
+            Self::Completed => "✓",
+            Self::Skipped => "↷",
+            Self::Failed => "■",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pending => "Tertunda",
+            Self::Completed => "Selesai",
+            Self::Skipped => "Dilewati",
+            Self::Failed => "Gagal",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchQueue {
     pub provider_type: usize,
@@ -91,6 +111,29 @@ impl BatchQueue {
             *slot = status;
             self.updated_at = now_seconds();
         }
+    }
+
+    pub fn status_at(&self, index: usize) -> BatchItemStatus {
+        self.statuses
+            .get(index)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Put failed episodes back in the pending queue so the next run retries
+    /// only those items. Completed/skipped items stay untouched.
+    pub fn retry_failed(&mut self) -> usize {
+        let mut retried = 0;
+        for status in &mut self.statuses {
+            if *status == BatchItemStatus::Failed {
+                *status = BatchItemStatus::Pending;
+                retried += 1;
+            }
+        }
+        if retried > 0 {
+            self.updated_at = now_seconds();
+        }
+        retried
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
@@ -190,6 +233,27 @@ mod tests {
 
         queue.mark(1, BatchItemStatus::Skipped);
         assert!(queue.is_done());
+    }
+
+    #[test]
+    fn retry_failed_resets_only_failed_items() {
+        let mut queue = BatchQueue::new(
+            0,
+            movie(),
+            vec![episode("1"), episode("2"), episode("3")],
+            "1080p".into(),
+            PathBuf::from("/tmp/animeku"),
+            ExistingFilePolicy::Skip,
+        );
+        queue.mark(0, BatchItemStatus::Completed);
+        queue.mark(1, BatchItemStatus::Failed);
+        queue.mark(2, BatchItemStatus::Skipped);
+
+        assert_eq!(queue.retry_failed(), 1);
+        assert_eq!(queue.status_at(0), BatchItemStatus::Completed);
+        assert_eq!(queue.status_at(1), BatchItemStatus::Pending);
+        assert_eq!(queue.status_at(2), BatchItemStatus::Skipped);
+        assert_eq!(queue.pending_indices(), vec![1]);
     }
 
     #[test]

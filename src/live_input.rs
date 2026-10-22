@@ -48,6 +48,12 @@ fn local_suggestions(history: &[String], query: &str) -> Vec<String> {
         .collect()
 }
 
+/// Show recent searches before the user types anything. This makes the search
+/// history useful without forcing a separate history screen.
+fn recent_suggestions(history: &[String]) -> Vec<String> {
+    history.iter().take(6).cloned().collect()
+}
+
 fn merge_suggestions(local: Vec<String>, remote: Vec<String>) -> Vec<String> {
     let mut merged = local;
     for title in remote {
@@ -144,7 +150,7 @@ pub async fn get_live_input(prompt: &str) -> anyhow::Result<Option<(String, bool
     let mut input = String::new();
     let mut cursor_index = 0usize;
     let local_history = crate::input::load_history();
-    let mut suggestions: Vec<String> = vec![];
+    let mut suggestions = recent_suggestions(&local_history);
     let mut selected_index: Option<usize> = None;
     let mut is_loading = false;
     let mut last_fetched_query = String::new();
@@ -306,7 +312,7 @@ pub async fn get_live_input(prompt: &str) -> anyhow::Result<Option<(String, bool
                                     cursor_index = prev;
                                 }
                                 if input.trim().is_empty() {
-                                    suggestions.clear();
+                                    suggestions = recent_suggestions(&local_history);
                                     is_loading = false;
                                     last_fetched_query.clear();
                                     if let Some(t) = fetch_task.take() {
@@ -393,7 +399,7 @@ pub async fn get_live_input(prompt: &str) -> anyhow::Result<Option<(String, bool
                                     cursor_index += c.len_utf8();
                                 }
                                 if input.trim().is_empty() {
-                                    suggestions.clear();
+                                    suggestions = recent_suggestions(&local_history);
                                     is_loading = false;
                                     last_fetched_query.clear();
                                     if let Some(t) = fetch_task.take() {
@@ -468,4 +474,32 @@ pub async fn get_live_input(prompt: &str) -> anyhow::Result<Option<(String, bool
     println!(); // Move to next line
 
     Ok(final_result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_suggestions_match_partial_history() {
+        let history = vec![
+            "Sousou no Frieren".to_string(),
+            "Jujutsu Kaisen".to_string(),
+            "Frieren".to_string(),
+        ];
+        assert_eq!(
+            local_suggestions(&history, "frieren"),
+            vec!["Sousou no Frieren", "Frieren"]
+        );
+        assert!(local_suggestions(&history, "").is_empty());
+    }
+
+    #[test]
+    fn recent_suggestions_are_limited_and_keep_order() {
+        let history = (1..=8).map(|n| format!("Title {n}")).collect::<Vec<_>>();
+        let recent = recent_suggestions(&history);
+        assert_eq!(recent.len(), 6);
+        assert_eq!(recent[0], "Title 1");
+        assert_eq!(recent[5], "Title 6");
+    }
 }

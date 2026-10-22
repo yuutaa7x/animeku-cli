@@ -181,6 +181,27 @@ pub fn download_to_path(
     stream: &Stream,
     output_path: &Path,
 ) -> Result<DownloadResult> {
+    download_to_path_inner(provider_type, stream, output_path, None)
+}
+
+/// Batch downloads share a pause flag. Pressing `p` during ffmpeg pauses the
+/// process on Unix and always stops the batch after the current episode, so the
+/// queue can be resumed later from the download manager.
+pub fn download_to_path_with_pause(
+    provider_type: usize,
+    stream: &Stream,
+    output_path: &Path,
+    pause: Arc<AtomicBool>,
+) -> Result<DownloadResult> {
+    download_to_path_inner(provider_type, stream, output_path, Some(pause))
+}
+
+fn download_to_path_inner(
+    provider_type: usize,
+    stream: &Stream,
+    output_path: &Path,
+    pause: Option<Arc<AtomicBool>>,
+) -> Result<DownloadResult> {
     ensure_available()?;
     if output_path.is_dir() {
         anyhow::bail!(
@@ -209,6 +230,7 @@ pub fn download_to_path(
         subtitle.as_deref(),
         Config::load().embed_subtitles,
         output_path,
+        pause,
     )
 }
 
@@ -602,12 +624,13 @@ fn build_ffmpeg_command(
 
 struct DownloadControl {
     cancel: Arc<AtomicBool>,
+    pause: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl DownloadControl {
-    fn start() -> Option<Self> {
+    fn start(pause: Arc<AtomicBool>, allow_pause: bool) -> Option<Self> {
         if enable_raw_mode().is_err() {
             return None;
         }
@@ -615,6 +638,7 @@ impl DownloadControl {
         let cancel = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
         let cancel_thread = Arc::clone(&cancel);
+        let pause_thread = Arc::clone(&pause);
         let stop_thread = Arc::clone(&stop);
         let handle = match std::thread::Builder::new()
             .name("animeku-download-input".into())
@@ -640,6 +664,10 @@ impl DownloadControl {
                             && key.modifiers.contains(KeyModifiers::CONTROL));
                     if cancel_key {
                         cancel_thread.store(true, Ordering::SeqCst);
+                    } else if allow_pause
+                        && (key.code == KeyCode::Char('p') || key.code == KeyCode::Char('P'))
+                    {
+                        pause_thread.fetch_xor(true, Ordering::SeqCst);
                     }
                 }
             }) {
@@ -652,6 +680,7 @@ impl DownloadControl {
 
         Some(Self {
             cancel,
+            pause,
             stop,
             handle: Some(handle),
         })
@@ -660,6 +689,25 @@ impl DownloadControl {
     fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::SeqCst)
     }
+
+    fn paused(&self) -> bool {
+        self.pause.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(unix)]
+fn set_process_paused(pid: u32, paused: bool) {
+    let signal = if paused { libc::SIGSTOP } else { libc::SIGCONT };
+    // Best effort: the process may have exited between the check and the signal.
+    unsafe {
+        libc::kill(pid as i32, signal);
+    }
+}
+
+#[cfg(not(unix))]
+fn set_process_paused(_pid: u32, _paused: bool) {
+    // Windows/macOS fall back to "pause after the current episode". The caller
+    // still records the request and stops before the next queue item.
 }
 
 impl Drop for DownloadControl {
@@ -679,7 +727,9 @@ fn run_ffmpeg(
     subtitle: Option<&str>,
     embed_subtitles: bool,
     output: &Path,
+    pause: Option<Arc<AtomicBool>>,
 ) -> Result<DownloadResult> {
+    let allow_pause = pause.is_some();
     let duration = probe_duration(provider_type, url);
     let partial = partial_path(output);
     if partial.exists() {
@@ -687,7 +737,21 @@ fn run_ffmpeg(
     }
 
     println!("{} Mengunduh dengan ffmpeg...", "◆".blue());
-    println!("  {} Tekan Esc/q/Ctrl+C untuk membatalkan.", "•".dimmed());
+    if allow_pause {
+        if cfg!(unix) {
+            println!(
+                "  {} Tekan Esc/q/Ctrl+C untuk membatalkan • p untuk jeda/lanjut.",
+                "•".dimmed()
+            );
+        } else {
+            println!(
+                "  {} Tekan Esc/q/Ctrl+C untuk membatalkan • p untuk jeda setelah episode ini.",
+                "•".dimmed()
+            );
+        }
+    } else {
+        println!("  {} Tekan Esc/q/Ctrl+C untuk membatalkan.", "•".dimmed());
+    }
     let mut command =
         build_ffmpeg_command(provider_type, url, audio, subtitle, embed_subtitles, &partial);
     command
@@ -728,13 +792,15 @@ fn run_ffmpeg(
         }
     });
 
-    let control = DownloadControl::start();
+    let pause_flag = pause.unwrap_or_default();
+    let control = DownloadControl::start(Arc::clone(&pause_flag), allow_pause);
     let mut out_seconds = 0.0_f64;
     let mut out_time_us_seen = false;
     let mut total_size = 0_u64;
     let mut speed = String::new();
     let mut finished = false;
     let mut cancelled = false;
+    let mut paused = false;
     let mut last_draw = Instant::now() - Duration::from_secs(1);
 
     loop {
@@ -769,8 +835,36 @@ fn run_ffmpeg(
 
         if control.as_ref().is_some_and(|control| control.cancelled()) {
             cancelled = true;
+            if paused {
+                set_process_paused(child.id(), false);
+            }
             let _ = child.kill();
             break;
+        }
+
+        if let Some(control) = &control {
+            let want_pause = control.paused();
+            if want_pause != paused {
+                paused = want_pause;
+                if cfg!(unix) {
+                    set_process_paused(child.id(), paused);
+                    clear_progress_line();
+                    if paused {
+                        println!(
+                            "  {} Download dijeda. Tekan p lagi untuk melanjutkan.",
+                            "ℹ".blue()
+                        );
+                    } else {
+                        println!("  {} Download dilanjutkan.", "▶".green());
+                    }
+                } else if paused {
+                    clear_progress_line();
+                    println!(
+                        "  {} Jeda diminta. Batch akan berhenti setelah episode ini.",
+                        "ℹ".blue()
+                    );
+                }
+            }
         }
 
         if last_draw.elapsed() >= Duration::from_millis(250) {
@@ -779,6 +873,9 @@ fn run_ffmpeg(
         }
     }
 
+    if paused {
+        set_process_paused(child.id(), false);
+    }
     if control.as_ref().is_some_and(|control| control.cancelled()) {
         cancelled = true;
     }

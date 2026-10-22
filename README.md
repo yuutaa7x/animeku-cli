@@ -133,26 +133,41 @@ Untuk Windows, hapus `animeku-cli.exe` dan `animeku.exe` dari `%USERPROFILE%\.ca
 - Otomatis memuat Subtitle Indonesia langsung ke player.
 - Download episode dengan pilihan kualitas/server, progress bar, nama file kustom, dan folder tujuan.
 - Download batch/rentang episode dengan antrean berurutan, kualitas otomatis mengikuti pilihan awal, progres keseluruhan + estimasi sisa waktu, dan opsi lewati/timpa file yang sudah ada.
-- Antrean batch disimpan otomatis ke `~/.animeku_batch_queue.json`. Kalau download dibatalkan atau gagal, menu **Lanjutkan Batch** dan opsi di pemilih episode bisa melanjutkan item yang belum selesai tanpa mengunduh ulang episode yang sudah beres.
+- Antrean batch disimpan otomatis ke `~/.animeku_batch_queue.json`. Kalau download dibatalkan, dijeda, atau gagal, menu **Kelola Download** dan opsi di pemilih episode bisa melanjutkan item yang belum selesai tanpa mengunduh ulang episode yang sudah beres.
 - Retry batch 3 kali dengan exponential backoff (1s, 2s). Episode yang tetap gagal dicatat ke `animeku-batch.log` di folder download, lalu dicoba lagi saat batch dilanjutkan.
 - Download bisa dibatalkan dengan `Esc`, `q`, atau `Ctrl+C`; ffmpeg dihentikan, file `.part` dibersihkan, dan ringkasan parsial ditampilkan.
+- Download batch bisa dijeda dengan `p`. Di Linux/macOS proses ffmpeg langsung di-`SIGSTOP`/`SIGCONT`; di platform lain batch berhenti dengan aman setelah episode saat ini.
+- **Kelola Download** menampilkan status tiap episode, retry semua episode gagal, membuka folder download, menghapus antrean, dan melanjutkan item yang tertunda.
 - Subtitle `.vtt` disimpan sebagai sidecar secara default. Pengaturan **Embed subtitle** bisa menanam subtitle langsung ke `.mkv`/`.mp4` (SRT/mov_text) agar video dan subtitle jadi satu file.
+- Subtitle saat memutar bisa dinyalakan/dimatikan dari Pengaturan. Saat memutar di MPV, tombol `n` langsung meminta episode berikutnya tanpa menunggu prompt.
 - Terintegrasi dengan Discord Rich Presence (RPC).
 - Fitur Riwayat Tontonan multi-entry (menyimpan histori judul & episode yang ditonton).
-- Fitur Riwayat Pencarian (suggestion otomatis saat mengetik).
-- Resume Otomatis (melanjutkan episode dari menit/detik terakhir yang ditonton).
-- Auto-Next Episode setelah selesai memutar.
-- Pengaturan persisten: player default, auto-next, provider, Discord RPC, banner compact, poster episode, embed subtitle, dan folder download.
+- Fitur Riwayat Pencarian (suggestion otomatis saat mengetik). Saran pencarian terakhir langsung muncul sebelum mulai mengetik, dan riwayat bisa dihapus dari menu pencarian.
+- Resume Otomatis (melanjutkan episode dari menit/detik terakhir yang ditonton). Jika episode terakhir sudah tamat, **Lanjutkan Tontonan** otomatis menyiapkan episode berikutnya.
+- Auto-Next Episode setelah selesai memutar, termasuk lanjut ke season berikutnya bila tersedia.
+- Panduan awal sekali jalan untuk memilih provider, player, dan perilaku auto-next agar tidak ditanya berulang kali.
+- Pengaturan persisten: player default, auto-next, provider, Discord RPC, banner compact, poster episode, embed subtitle, subtitle saat memutar, dan folder download.
 - Dukungan CLI flags untuk pencarian langsung, resume, update, cek update, pemilihan provider/player, dan menonaktifkan RPC.
-- Pengecekan dependensi dan Check Health sistem yang interaktif.
-- Retry otomatis dan fallback Idlix ↔ Otakudesu saat provider error atau tidak mengembalikan hasil.
+- Pengecekan dependensi dan Check Health sistem yang interaktif, termasuk tes koneksi Idlix dan Otakudesu secara langsung.
+- Retry otomatis dan fallback Idlix ↔ Otakudesu saat provider error atau tidak mengembalikan hasil. Jika pencarian, daftar episode, atau stream tetap gagal, tersedia prompt **Coba lagi** tanpa harus keluar aplikasi.
 - Request ke provider dibatasi otomatis (default 350ms) agar tidak membanjiri situs. Bisa diubah lewat `ANIMEKU_RATE_LIMIT_MS`.
 - Cache metadata persisten untuk hasil pencarian dan daftar episode, sehingga pencarian ulang lebih cepat tanpa mengambil stream lama.
 - Watchlist untuk menyimpan judul, lalu langsung memilih episode atau melanjutkan tontonan terakhir dari menu utama.
 - **Cek Episode Baru** di watchlist menyimpan jumlah episode terakhir dan memberi notifikasi berapa episode baru yang tersedia. Dari detail watchlist kamu juga bisa langsung **Download Episode Baru** sebagai batch.
-- **Jelajahi anime (AniList)** menampilkan trending anime, skor, tahun, genre, dan sinopsis. Detail AniList juga bisa dibuka dari watchlist.
+- **Jelajahi anime (AniList)** menampilkan trending anime, anime musim ini, jelajah genre, skor, tahun, genre, dan sinopsis. Detail AniList juga bisa dibuka dari watchlist.
 
 ### Changelog
+
+#### v0.5.0 — Lanjut tontonan, kelola download, discovery & onboarding (22 Oktober 2026)
+
+- **Lanjutkan Tontonan** sekarang meneruskan ke episode berikutnya bila episode terakhir sudah tamat, bukan memutar ulang episode yang sama. Label menu utama ikut menampilkan status ini.
+- **Kelola Download** baru: daftar status per episode, retry episode gagal, buka folder, hapus antrean, serta lanjutkan batch yang tertunda. Batch bisa dijeda dengan `p`; ffmpeg dijeda/dilanjutkan lewat `SIGSTOP`/`SIGCONT` di Linux/macOS.
+- **Jelajahi Anime** diperluas: trending, anime musim ini (dihitung otomatis dari tanggal), jelajah genre, dan pencarian info AniList. Saran pencarian terakhir muncul di input sebelum mengetik, dengan aksi hapus riwayat.
+- **Pemulihan error**: pencarian, daftar episode, dan stream yang gagal menawarkan **Coba lagi** tanpa keluar aplikasi. Pesan fallback provider menjelaskan bahwa judul/episode akan dicocokkan di provider cadangan.
+- **Player UX**: tombol `n` di MPV langsung meminta episode berikutnya; subtitle saat memutar bisa diatur; fallback browser menampilkan peringatan yang lebih jelas.
+- **Onboarding pertama**: pilih provider, player, dan auto-next sekali saja. Pemeriksaan dependensi juga hanya muncul sekali dan bisa dijalankan ulang lewat Pengaturan.
+- **Check Health** sekarang bisa menguji koneksi Idlix dan Otakudesu secara langsung beserta latensi dan jumlah hasil.
+- Test baru untuk config lama, status batch, retry batch, pemetaan musim AniList, saran pencarian, dan lanjut episode berikutnya. Total 101 test (94 aktif, 7 live/network opsional).
 
 #### v0.4.2 — Update safety, smoke test rilis & rate limit provider (21 Oktober 2026)
 

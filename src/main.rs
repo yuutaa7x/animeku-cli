@@ -47,6 +47,10 @@ fn mpv_last_pos_file_path() -> String {
     crate::util::temp_file("animeku_last_pos.txt")
 }
 
+fn mpv_next_file_path() -> String {
+    crate::util::temp_file("animeku_next_requested.txt")
+}
+
 const PROVIDER_IDLIX: usize = ext::PROVIDER_IDLIX;
 pub const PROVIDER_OTAKUDESU: usize = ext::PROVIDER_OTAKUDESU;
 
@@ -488,7 +492,7 @@ fn detect_package_manager() -> &'static str {
     "unknown"
 }
 
-fn show_health_screen() -> anyhow::Result<bool> {
+async fn show_health_screen() -> anyhow::Result<bool> {
     loop {
         clearscreen_and_show_banner()?;
         
@@ -549,6 +553,11 @@ fn show_health_screen() -> anyhow::Result<bool> {
         } else {
             println!("  {} {}", "[ 2 ]".bright_black(), "Continue to Animeku-CLI (Watch Anime - Browser Only)".bright_black());
         }
+        println!(
+            "  {} {}",
+            "[ 3 ]".bright_white(),
+            "Tes koneksi Idlix & Otakudesu".bright_white()
+        );
         println!("  {} {}", "[ q ]".bright_white(), "Kembali".bright_white());
         println!();
         
@@ -563,6 +572,8 @@ fn show_health_screen() -> anyhow::Result<bool> {
             return Ok(false);
         } else if choice == '2' || choice == '\n' {
             return Ok(true);
+        } else if choice == '3' {
+            handle_provider_health().await?;
         } else if choice == '1' {
             let package_manager = detect_package_manager();
             if package_manager == "unknown" {
@@ -594,6 +605,36 @@ fn show_health_screen() -> anyhow::Result<bool> {
             std::io::stdin().read_line(&mut dummy)?;
         }
     }
+}
+
+async fn handle_provider_health() -> anyhow::Result<()> {
+    clearscreen_and_show_banner()?;
+    println!("  {}", "================ KESEHATAN PROVIDER ================".bright_magenta());
+    println!();
+    for provider in [PROVIDER_IDLIX, PROVIDER_OTAKUDESU] {
+        print!("  {} ... ", ext::provider_name(provider).bright_white());
+        stdout().flush()?;
+        match crate::ext::check_provider_health(provider).await {
+            Ok(health) => println!(
+                "{} siap • {}ms • {} hasil uji",
+                "✓".bright_green(),
+                health.latency.as_millis(),
+                health.results
+            ),
+            Err(error) => {
+                println!("{} tidak dapat dihubungi", "■".bright_red());
+                println!("    {} {:#}", "↳".bright_yellow(), error);
+            }
+        }
+    }
+    println!();
+    println!(
+        "  Jika satu provider gagal, animeku-cli tetap mencoba provider lainnya secara otomatis."
+    );
+    println!("  Tekan Enter untuk kembali...");
+    let mut dummy = String::new();
+    let _ = std::io::stdin().read_line(&mut dummy);
+    Ok(())
 }
 
 fn is_otakudesu_image(url: &str) -> bool {
@@ -735,6 +776,8 @@ enum PlaybackOutcome {
         position: u64,
         offer_next: bool,
         completed: bool,
+        /// MPV's `n` key was pressed. The caller can skip the usual prompt.
+        next_requested: bool,
     },
     Cancelled,
 }
@@ -821,13 +864,19 @@ async fn execute_player(
     let mut played = false;
     let mut offer_next = true;
     let mut completed = false;
+    let mut next_requested = false;
 
     match choice_normalized {
         0 => {
             println!("Sedang memutar video di MPV... (Tutup MPV untuk kembali ke menu)");
+            println!(
+                "  {} Tekan n di MPV untuk langsung lanjut ke episode berikutnya.",
+                "•".dimmed()
+            );
 
             let track_script = mpv_track_script_path();
             let last_pos_file = mpv_last_pos_file_path();
+            let next_file = mpv_next_file_path();
 
             let lua_script = format!(
                 r#"
@@ -844,11 +893,21 @@ local function save()
 end
 mp.add_periodic_timer(2, save)
 mp.register_event("shutdown", save)
+mp.add_key_binding("n", "animeku-next", function()
+    save()
+    local f = io.open("{}", "w")
+    if f then
+        f:write("1")
+        f:close()
+    end
+    mp.commandv("quit")
+end)
 "#,
-                start_seconds, last_pos_file
+                start_seconds, last_pos_file, next_file
             );
             let _ = std::fs::write(&track_script, lua_script);
             let _ = std::fs::remove_file(&last_pos_file);
+            let _ = std::fs::remove_file(&next_file);
 
             let mpv_bin = resolve_command_path("mpv");
             let mut cmd = Command::new(&mpv_bin);
@@ -892,8 +951,10 @@ mp.register_event("shutdown", save)
                     cmd.arg(format!("--audio-file={}", audio_file));
                 }
                 let sub_file = idlix_subtitle_path();
-                if std::path::Path::new(&sub_file).exists() {
+                if config.subtitles && std::path::Path::new(&sub_file).exists() {
                     cmd.arg(format!("--sub-file={}", sub_file));
+                } else if !config.subtitles {
+                    cmd.arg("--sub-auto=no");
                 }
             } else if provider_type == PROVIDER_OTAKUDESU {
                 cmd.arg(format!("--http-header-fields=Referer: {}", OTAKUDESU_REFERER));
@@ -928,7 +989,12 @@ mp.register_event("shutdown", save)
                     played = true;
                 }
             }
+            if std::fs::read_to_string(&next_file).is_ok() {
+                next_requested = true;
+                offer_next = true;
+            }
             let _ = std::fs::remove_file(&last_pos_file);
+            let _ = std::fs::remove_file(&next_file);
             let _ = std::fs::remove_file(&track_script);
         },
         1 => {
@@ -1030,6 +1096,10 @@ mp.register_event("shutdown", save)
                     // push the user into the auto-next prompt afterwards.
                     offer_next = false;
                     println!("\n{} Tautan dibuka di browser.", "✓".green());
+                    println!(
+                        "  {} Browser adalah fallback: posisi tontonan dan auto-next tidak dilacak.",
+                        "ℹ".yellow()
+                    );
                     println!("Tekan Enter setelah selesai menonton untuk kembali...");
                     let mut dummy = String::new();
                     let _ = std::io::stdin().read_line(&mut dummy);
@@ -1047,6 +1117,7 @@ mp.register_event("shutdown", save)
             position: final_pos,
             offer_next,
             completed,
+            next_requested,
         })
     } else {
         Ok(PlaybackOutcome::Cancelled)
@@ -1079,7 +1150,10 @@ fn detect_season_for_episode(
 }
 
 enum EpisodePlayback {
-    Played { offer_next: bool },
+    Played {
+        offer_next: bool,
+        next_requested: bool,
+    },
     PlayerCancelled,
     StreamCancelled,
 }
@@ -1153,6 +1227,7 @@ async fn play_episode(
             position,
             offer_next,
             completed,
+            next_requested,
         } => {
             input::save_watch_entry(&crate::models::WatchEntry {
                 movie,
@@ -1162,7 +1237,10 @@ async fn play_episode(
                 completed,
                 updated_at: 0,
             });
-            Ok(EpisodePlayback::Played { offer_next })
+            Ok(EpisodePlayback::Played {
+                offer_next,
+                next_requested,
+            })
         }
     }
 }
@@ -1209,7 +1287,10 @@ async fn handle_movie_episodes(
                     }
                     break;
                 }
-                EpisodePlayback::Played { offer_next } => {
+                EpisodePlayback::Played {
+                    offer_next,
+                    next_requested,
+                } => {
                     sync_active_playback(animeku, &mut active_movie, &mut episode);
                     let single_movie = !episode.is_series;
                     if offer_next {
@@ -1221,7 +1302,7 @@ async fn handle_movie_episodes(
                             .and_then(|episodes| find_next_episode(&episodes, &episode).cloned());
 
                         if let Some(next_ep) = next_ep_opt {
-                            if confirm_next_episode(&next_ep)? {
+                            if next_requested || confirm_next_episode(&next_ep)? {
                                 episode = next_ep;
                                 continue;
                             }
@@ -1271,7 +1352,10 @@ async fn resume_watch_entry(
                 continue;
             }
             EpisodePlayback::StreamCancelled => break,
-            EpisodePlayback::Played { offer_next } => {
+            EpisodePlayback::Played {
+                offer_next,
+                next_requested,
+            } => {
                 sync_active_playback(&animeku, &mut movie, &mut episode);
                 if offer_next {
                     let next_ep_opt = animeku
@@ -1279,7 +1363,7 @@ async fn resume_watch_entry(
                         .and_then(|episodes| find_next_episode(&episodes, &episode).cloned());
 
                     if let Some(next_ep) = next_ep_opt {
-                        if confirm_next_episode(&next_ep)? {
+                        if next_requested || confirm_next_episode(&next_ep)? {
                             episode = next_ep;
                             start_seconds = 0;
                             continue;
@@ -1294,6 +1378,26 @@ async fn resume_watch_entry(
     Ok(())
 }
 
+/// Build the next history entry for a completed episode. A completed item
+/// should continue the story, not replay the same episode from the beginning.
+fn next_watch_entry(
+    entry: &crate::models::WatchEntry,
+    episodes: &[crate::models::Episode],
+) -> Option<crate::models::WatchEntry> {
+    if !entry.completed {
+        return None;
+    }
+    let next_episode = find_next_episode(episodes, &entry.episode)?.clone();
+    Some(crate::models::WatchEntry {
+        movie: entry.movie.clone(),
+        episode: next_episode,
+        provider_type: entry.provider_type,
+        position_seconds: 0,
+        completed: false,
+        updated_at: 0,
+    })
+}
+
 async fn handle_resume_latest(discord: &mut Option<DiscordIpcClient>) -> anyhow::Result<()> {
     let Some(entry) = load_watch_history().into_iter().next() else {
         clearscreen_and_show_banner()?;
@@ -1304,21 +1408,76 @@ async fn handle_resume_latest(discord: &mut Option<DiscordIpcClient>) -> anyhow:
         return Ok(());
     };
 
+    if entry.completed {
+        let mut animeku = AnimekuCli::for_provider(entry.provider_type);
+        let _ = animeku.ensure_meta(&entry.movie).await;
+        let episodes = animeku
+            .get_episode_list(&entry.movie.id)
+            .unwrap_or_default();
+        if let Some(mut next_entry) = next_watch_entry(&entry, &episodes) {
+            if let Some(active_movie) = animeku.current_movie() {
+                next_entry.movie = active_movie.clone();
+            }
+            return resume_watch_entry(discord, &next_entry, 0).await;
+        }
+
+        clearscreen_and_show_banner()?;
+        println!(
+            "{} '{}' sudah tamat.",
+            "✓".green(),
+            crate::models::clean_movie_title(&entry.movie.title)
+        );
+        println!();
+        if confirm_action("Putar ulang episode terakhir dari awal?")? {
+            return resume_watch_entry(discord, &entry, 0).await;
+        }
+        return Ok(());
+    }
+
     resume_watch_entry(discord, &entry, entry.position_seconds).await
 }
 
-async fn handle_explore(discord: &mut Option<DiscordIpcClient>) -> anyhow::Result<()> {
+fn discovery_label(info: &crate::anilist::MediaInfo) -> String {
+    let mut facts = Vec::new();
+    if let Some(score) = info.average_score {
+        facts.push(format!("{score}"));
+    }
+    if let Some(year) = info.year {
+        facts.push(year.to_string());
+    }
+    if !info.genres.is_empty() {
+        facts.push(
+            info.genres
+                .iter()
+                .take(2)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+    if facts.is_empty() {
+        info.title.clone()
+    } else {
+        format!("{} • {}", info.title, facts.join(" • "))
+    }
+}
+
+async fn show_discovery_list<F>(
+    discord: &mut Option<DiscordIpcClient>,
+    heading: &str,
+    loading_message: &str,
+    fetch: F,
+) -> anyhow::Result<()>
+where
+    F: std::future::Future<Output = anyhow::Result<Vec<crate::anilist::MediaInfo>>>,
+{
     clearscreen_and_show_banner()?;
-    let media = match crate::util::with_spinner(
-        "Mengambil trending anime dari AniList...",
-        crate::anilist::trending(20),
-    )
-    .await
-    {
+    let media = match crate::util::with_spinner(loading_message, fetch).await {
         Ok(media) => media,
         Err(error) => {
-            eprintln!("{} Gagal memuat trending AniList: {:#}", "■".red(), error);
+            eprintln!("{} Gagal memuat {}: {:#}", "■".red(), heading, error);
             println!();
+            println!("Koneksi ke AniList bermasalah. Coba lagi dari menu Jelajahi.");
             println!("Tekan Enter untuk kembali...");
             let mut dummy = String::new();
             let _ = std::io::stdin().read_line(&mut dummy);
@@ -1327,7 +1486,7 @@ async fn handle_explore(discord: &mut Option<DiscordIpcClient>) -> anyhow::Resul
     };
 
     if media.is_empty() {
-        println!("Tidak ada hasil trending dari AniList.\n");
+        println!("Tidak ada hasil dari AniList.\n");
         println!("Tekan Enter untuk kembali...");
         let mut dummy = String::new();
         let _ = std::io::stdin().read_line(&mut dummy);
@@ -1336,28 +1495,14 @@ async fn handle_explore(discord: &mut Option<DiscordIpcClient>) -> anyhow::Resul
 
     loop {
         clearscreen_and_show_banner()?;
-        let mut entries = Vec::with_capacity(media.len() + 2);
-        for info in &media {
-            let mut facts = Vec::new();
-            if let Some(score) = info.average_score {
-                facts.push(format!("{score}"));
-            }
-            if let Some(year) = info.year {
-                facts.push(year.to_string());
-            }
-            let suffix = if facts.is_empty() {
-                String::new()
-            } else {
-                format!(" • {}", facts.join(" • "))
-            };
-            entries.push(input::MenuEntry::new(format!("{}{}", info.title, suffix)));
-        }
-        entries.push(input::MenuEntry::new("Cari info anime lain"));
+        let mut entries = media
+            .iter()
+            .map(|info| input::MenuEntry::new(discovery_label(info)))
+            .collect::<Vec<_>>();
+        entries.push(input::MenuEntry::new("Cari anime lain"));
         entries.push(input::MenuEntry::new("Kembali"));
 
-        let Some(choice) =
-            input::select_menu_simple("Trending Anime (AniList):", &entries, 0)?
-        else {
+        let Some(choice) = input::select_menu_simple(heading, &entries, 0)? else {
             break;
         };
 
@@ -1398,53 +1543,231 @@ async fn handle_explore(discord: &mut Option<DiscordIpcClient>) -> anyhow::Resul
     Ok(())
 }
 
-async fn handle_resume_batch() -> anyhow::Result<()> {
-    clearscreen_and_show_banner()?;
-    let Some(mut queue) = crate::batch::BatchQueue::load() else {
-        println!("Tidak ada antrean batch yang tersimpan.\n");
-        println!("Tekan Enter untuk kembali...");
-        let mut dummy = String::new();
-        let _ = std::io::stdin().read_line(&mut dummy);
-        return Ok(());
-    };
+async fn handle_explore(discord: &mut Option<DiscordIpcClient>) -> anyhow::Result<()> {
+    loop {
+        clearscreen_and_show_banner()?;
+        let (season, year) = crate::anilist::current_season();
+        let labels = [
+            "Trending Anime".to_string(),
+            format!("Anime Musim Ini ({} {})", season, year),
+            "Jelajahi Genre".to_string(),
+            "Cari Info Anime".to_string(),
+            "Kembali".to_string(),
+        ];
+        let entries = labels
+            .iter()
+            .cloned()
+            .map(input::MenuEntry::new)
+            .collect::<Vec<_>>();
+        let Some(choice) = input::select_menu_simple("Jelajahi Anime (AniList):", &entries, 0)?
+        else {
+            break;
+        };
 
-    if queue.is_done() {
-        crate::batch::BatchQueue::clear();
-        println!("Antrean batch terakhir sudah selesai.\n");
-        println!("Tekan Enter untuk kembali...");
-        let mut dummy = String::new();
-        let _ = std::io::stdin().read_line(&mut dummy);
-        return Ok(());
+        match choice {
+            0 => {
+                show_discovery_list(
+                    discord,
+                    "Trending Anime (AniList):",
+                    "Mengambil trending anime dari AniList...",
+                    crate::anilist::trending(20),
+                )
+                .await?;
+            }
+            1 => {
+                show_discovery_list(
+                    discord,
+                    &format!("Anime {} {}:", season, year),
+                    &format!("Mengambil anime musim {} {}...", season, year),
+                    crate::anilist::seasonal(season, year, 20),
+                )
+                .await?;
+            }
+            2 => {
+                let mut genre_entries = crate::anilist::GENRES
+                    .iter()
+                    .map(|genre| input::MenuEntry::new(*genre))
+                    .collect::<Vec<_>>();
+                genre_entries.push(input::MenuEntry::new("Kembali"));
+                let Some(genre_index) =
+                    input::select_menu_simple("Pilih Genre:", &genre_entries, 0)?
+                else {
+                    continue;
+                };
+                let Some(genre) = crate::anilist::GENRES.get(genre_index) else {
+                    continue;
+                };
+                show_discovery_list(
+                    discord,
+                    &format!("Anime Genre {}:", genre),
+                    &format!("Mengambil anime genre {}...", genre),
+                    crate::anilist::by_genre(genre, 20),
+                )
+                .await?;
+            }
+            3 => {
+                show_discovery_list(
+                    discord,
+                    "Cari Info Anime:",
+                    "Menyiapkan pencarian AniList...",
+                    async {
+                        let title: String =
+                            dialoguer::Input::with_theme(&crate::util::custom_theme())
+                                .with_prompt("Judul anime")
+                                .interact_text()?;
+                        let title = title.trim();
+                        if title.is_empty() {
+                            return Ok(Vec::new());
+                        }
+                        Ok(crate::anilist::search(title)
+                            .await?
+                            .into_iter()
+                            .collect())
+                    },
+                )
+                .await?;
+            }
+            _ => break,
+        }
     }
 
-    let (completed, skipped, failed, pending) = queue.counts();
-    println!("Antrean Batch Tersimpan:");
-    println!(
-        "  Judul    : {}",
-        crate::models::clean_movie_title(&queue.movie.title)
-    );
-    println!("  Provider : {}", ext::provider_name(queue.provider_type));
-    println!("  Kualitas : {}", queue.target_quality);
-    println!("  Folder   : {}", queue.directory);
-    println!(
-        "  Progres  : {} berhasil • {} dilewati • {} gagal • {} tertunda",
-        completed, skipped, failed, pending
-    );
-    println!();
+    Ok(())
+}
 
-    if !confirm_action("Lanjutkan batch sekarang?")? {
-        return Ok(());
-    }
+async fn handle_batch_manager() -> anyhow::Result<()> {
+    loop {
+        clearscreen_and_show_banner()?;
+        let Some(mut queue) = crate::batch::BatchQueue::load() else {
+            println!("Tidak ada antrean batch yang tersimpan.\n");
+            println!("Tekan Enter untuk kembali...");
+            let mut dummy = String::new();
+            let _ = std::io::stdin().read_line(&mut dummy);
+            return Ok(());
+        };
 
-    let mut animeku = AnimekuCli::for_provider(queue.provider_type);
-    if let Err(error) = animeku.run_batch(&mut queue).await {
-        eprintln!("{} Batch download gagal: {:#}", "■".red(), error);
+        if queue.is_done() {
+            crate::batch::BatchQueue::clear();
+            println!("Antrean batch terakhir sudah selesai.\n");
+            println!("Tekan Enter untuk kembali...");
+            let mut dummy = String::new();
+            let _ = std::io::stdin().read_line(&mut dummy);
+            return Ok(());
+        }
+
+        let (completed, skipped, failed, pending) = queue.counts();
+        println!("Kelola Download:");
+        println!(
+            "  Judul    : {}",
+            crate::models::clean_movie_title(&queue.movie.title)
+        );
+        println!("  Provider : {}", ext::provider_name(queue.provider_type));
+        println!("  Kualitas : {}", queue.target_quality);
+        println!("  Folder   : {}", queue.directory);
+        println!(
+            "  Progres  : {} berhasil • {} dilewati • {} gagal • {} tertunda",
+            completed, skipped, failed, pending
+        );
         println!();
-        println!("Tekan Enter untuk kembali...");
-        let mut dummy = String::new();
-        let _ = std::io::stdin().read_line(&mut dummy);
+
+        for (index, episode) in queue.episodes.iter().enumerate() {
+            let status = queue.status_at(index);
+            println!(
+                "  {} {:>3}. {} — {}",
+                status.icon(),
+                index + 1,
+                crate::models::clean_episode_title(&episode.title),
+                status.label()
+            );
+        }
+        println!();
+
+        let mut labels = vec!["▶ Lanjutkan / Mulai Antrean".to_string()];
+        let mut actions = vec![BatchManagerAction::Run];
+        if failed > 0 {
+            labels.push(format!("↻ Retry {} Episode Gagal", failed));
+            actions.push(BatchManagerAction::RetryFailed);
+        }
+        labels.push("📂 Buka Folder Download".to_string());
+        actions.push(BatchManagerAction::OpenFolder);
+        labels.push("🗑 Hapus Antrean".to_string());
+        actions.push(BatchManagerAction::Clear);
+        labels.push("Kembali".to_string());
+        actions.push(BatchManagerAction::Back);
+
+        let entries = labels
+            .iter()
+            .cloned()
+            .map(input::MenuEntry::new)
+            .collect::<Vec<_>>();
+        let Some(choice) = input::select_menu_simple("Pilih Tindakan Download:", &entries, 0)?
+        else {
+            break;
+        };
+        let action = actions
+            .get(choice)
+            .copied()
+            .unwrap_or(BatchManagerAction::Back);
+
+        match action {
+            BatchManagerAction::Run => {
+                let mut animeku = AnimekuCli::for_provider(queue.provider_type);
+                if let Err(error) = animeku.run_batch(&mut queue).await {
+                    eprintln!("{} Batch download gagal: {:#}", "■".red(), error);
+                    println!();
+                    println!("Tekan Enter untuk kembali...");
+                    let mut dummy = String::new();
+                    let _ = std::io::stdin().read_line(&mut dummy);
+                }
+            }
+            BatchManagerAction::RetryFailed => {
+                let retried = queue.retry_failed();
+                queue.save()?;
+                println!(
+                    "{} {} episode gagal dipindahkan kembali ke antrean.",
+                    "✓".green(),
+                    retried
+                );
+                println!("\nTekan Enter untuk kembali...");
+                let mut dummy = String::new();
+                let _ = std::io::stdin().read_line(&mut dummy);
+            }
+            BatchManagerAction::OpenFolder => {
+                let directory = std::path::PathBuf::from(&queue.directory);
+                let _ = std::fs::create_dir_all(&directory);
+                match open::that(&directory) {
+                    Ok(()) => println!("{} Membuka '{}'.", "✓".green(), directory.display()),
+                    Err(error) => eprintln!(
+                        "{} Gagal membuka folder '{}': {}",
+                        "■".red(),
+                        directory.display(),
+                        error
+                    ),
+                }
+                println!("\nTekan Enter untuk kembali...");
+                let mut dummy = String::new();
+                let _ = std::io::stdin().read_line(&mut dummy);
+            }
+            BatchManagerAction::Clear => {
+                if confirm_action(
+                    "Hapus antrean download? File yang sudah selesai tidak dihapus.",
+                )? {
+                    crate::batch::BatchQueue::clear();
+                    return Ok(());
+                }
+            }
+            BatchManagerAction::Back => break,
+        }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchManagerAction {
+    Run,
+    RetryFailed,
+    OpenFolder,
+    Clear,
+    Back,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1468,11 +1791,16 @@ fn show_main_menu() -> anyhow::Result<Option<MainAction>> {
     let mut actions = Vec::new();
 
     if let Some(entry) = watch_history.first() {
+        let status = if entry.completed {
+            "lanjut episode berikutnya".to_string()
+        } else {
+            entry.format_duration()
+        };
         entries.push(input::MenuEntry::new(format!(
             "[ Lanjutkan: {} - {} | {} ]",
             crate::models::clean_movie_title(&entry.movie.title),
             crate::models::clean_episode_title(&entry.episode.title),
-            entry.format_duration()
+            status
         )));
         actions.push(MainAction::Continue);
     }
@@ -1483,10 +1811,11 @@ fn show_main_menu() -> anyhow::Result<Option<MainAction>> {
         } else {
             let (completed, skipped, failed, pending) = queue.counts();
             entries.push(input::MenuEntry::new(format!(
-                "[ Lanjutkan Batch: {} | {}/{} selesai, {} tertunda ]",
+                "[ Kelola Download: {} | {}/{} selesai, {} gagal, {} tertunda ]",
                 crate::models::clean_movie_title(&queue.movie.title),
-                completed + skipped + failed,
+                completed + skipped,
                 queue.episodes.len(),
+                failed,
                 pending
             )));
             actions.push(MainAction::Batch);
@@ -1526,6 +1855,88 @@ fn confirm_action(prompt: &str) -> anyhow::Result<bool> {
         .default(false)
         .interact_opt()?
         .unwrap_or(false))
+}
+
+/// Mark onboarding as handled when the user skips it, so the guide does not
+/// reappear on every launch. Defaults already in the config remain unchanged.
+fn skip_onboarding(config: &mut config::Config) -> anyhow::Result<()> {
+    config.onboarding_done = true;
+    config.save();
+    Ok(())
+}
+
+/// First-run guide. It exists to remove two recurring prompts: provider
+/// selection for every title and player selection for every episode.
+fn run_onboarding(config: &mut config::Config) -> anyhow::Result<()> {
+    clearscreen_and_show_banner()?;
+    println!("{}", "Selamat datang di Animeku-CLI!".bright_green().bold());
+    println!();
+    println!("Sebelum mulai, atur default yang paling nyaman untukmu.");
+    println!("Semua pilihan ini bisa diubah lagi lewat menu Pengaturan.\n");
+
+    let has_mpv = check_command_exists("mpv");
+    let player_labels = [
+        "Tanya setiap kali",
+        "MPV (disarankan)",
+        "VLC",
+        "Browser (fallback)",
+    ];
+    let player_entries = player_labels
+        .iter()
+        .map(|label| input::MenuEntry::new(*label))
+        .collect::<Vec<_>>();
+    let player_default = if has_mpv { 1 } else { 3 };
+    let Some(player_index) =
+        input::select_menu_simple("Player default:", &player_entries, player_default)?
+    else {
+        return skip_onboarding(config);
+    };
+    config.player = config::PlayerChoice::from_index(player_index);
+    config.last_player = (player_index > 0).then_some(config.player);
+
+    let provider_labels = ["Otomatis (disarankan)", "Idlix", "Otakudesu"];
+    let provider_entries = provider_labels
+        .iter()
+        .map(|label| input::MenuEntry::new(*label))
+        .collect::<Vec<_>>();
+    let Some(provider_index) =
+        input::select_menu_simple("Provider default:", &provider_entries, 0)?
+    else {
+        return skip_onboarding(config);
+    };
+    config.provider = config::ProviderPreference::from_index(provider_index);
+
+    let auto_next_labels = ["Tanya", "Selalu lanjut (disarankan)", "Jangan pernah"];
+    let auto_next_entries = auto_next_labels
+        .iter()
+        .map(|label| input::MenuEntry::new(*label))
+        .collect::<Vec<_>>();
+    let Some(auto_next_index) =
+        input::select_menu_simple("Setelah episode selesai:", &auto_next_entries, 1)?
+    else {
+        return skip_onboarding(config);
+    };
+    config.auto_next = config::AutoNext::from_index(auto_next_index);
+
+    config.onboarding_done = true;
+    config.save();
+
+    clearscreen_and_show_banner()?;
+    println!("{} Pengaturan awal disimpan.", "✓".green());
+    println!("  Player    : {}", config.player.label());
+    println!("  Provider  : {}", config.provider.label());
+    println!("  Auto-next : {}", config.auto_next.label());
+    println!();
+    if !has_mpv && config.effective_player() != config::PlayerChoice::Browser {
+        println!(
+            "  {} MPV belum terdeteksi. Pemeriksaan dependensi akan dibuka sekali sekarang.",
+            "ℹ".yellow()
+        );
+    }
+    println!("\nTekan Enter untuk melanjutkan...");
+    let mut dummy = String::new();
+    let _ = std::io::stdin().read_line(&mut dummy);
+    Ok(())
 }
 
 fn choose_player_setting(config: &mut config::Config) -> anyhow::Result<()> {
@@ -1652,6 +2063,10 @@ async fn handle_settings_menu(discord: &mut Option<DiscordIpcClient>) -> anyhow:
                 }
             ),
             format!(
+                "Subtitle saat memutar: {}",
+                if config.subtitles { "Aktif" } else { "Mati" }
+            ),
+            format!(
                 "Folder download: {}",
                 config
                     .download_dir
@@ -1662,6 +2077,7 @@ async fn handle_settings_menu(discord: &mut Option<DiscordIpcClient>) -> anyhow:
             "Hapus riwayat tontonan".to_string(),
             "Hapus watchlist".to_string(),
             "Hapus cache metadata & provider".to_string(),
+            "Panduan awal / onboarding".to_string(),
             "Perbarui Animeku-CLI".to_string(),
             "Kembali".to_string(),
         ];
@@ -1706,30 +2122,39 @@ async fn handle_settings_menu(discord: &mut Option<DiscordIpcClient>) -> anyhow:
                 config.embed_subtitles = !config.embed_subtitles;
                 config.save();
             }
-            7 => choose_download_dir_setting(&mut config)?,
-            8 => {
+            7 => {
+                config.subtitles = !config.subtitles;
+                config.save();
+            }
+            8 => choose_download_dir_setting(&mut config)?,
+            9 => {
                 if confirm_action("Hapus semua riwayat pencarian?")? {
                     input::clear_search_history();
                 }
             }
-            9 => {
+            10 => {
                 if confirm_action("Hapus semua riwayat tontonan?")? {
                     input::clear_watch_history();
                 }
             }
-            10 => {
+            11 => {
                 if confirm_action("Hapus semua watchlist?")? {
                     input::clear_watchlist();
                 }
             }
-            11 => {
+            12 => {
                 if confirm_action("Hapus cache metadata, deteksi, dan pilihan provider?")? {
                     crate::cache::clear();
                     input::clear_provider_detections();
                     input::clear_search_providers();
                 }
             }
-            12 => handle_self_update(true).await?,
+            13 => {
+                if confirm_action("Jalankan panduan awal lagi?")? {
+                    run_onboarding(&mut config)?;
+                }
+            }
+            14 => handle_self_update(true).await?,
             _ => break,
         }
     }
@@ -2627,9 +3052,21 @@ async fn run_app() -> anyhow::Result<()> {
         return result;
     }
 
-    if !check_command_exists("mpv") && !show_health_screen()? {
-        crate::util::cleanup_temp_files();
-        return Ok(());
+    let mut config = config::Config::load();
+    if !config.onboarding_done {
+        run_onboarding(&mut config)?;
+        config = config::Config::load();
+    }
+
+    if config.needs_dependency_check(check_command_exists("mpv")) {
+        let proceed = show_health_screen().await?;
+        let mut updated = config::Config::load();
+        updated.dependency_check_done = true;
+        updated.save();
+        if !proceed {
+            crate::util::cleanup_temp_files();
+            return Ok(());
+        }
     }
 
     loop {
@@ -2645,7 +3082,7 @@ async fn run_app() -> anyhow::Result<()> {
                 handle_resume_latest(&mut discord).await?;
             }
             MainAction::Batch => {
-                handle_resume_batch().await?;
+                handle_batch_manager().await?;
             }
             MainAction::Search => {
                 handle_search_and_watch(&mut discord).await?;
@@ -2663,7 +3100,11 @@ async fn run_app() -> anyhow::Result<()> {
                 handle_settings_menu(&mut discord).await?;
             }
             MainAction::Health => {
-                let _ = show_health_screen()?;
+                if show_health_screen().await? {
+                    let mut updated = config::Config::load();
+                    updated.dependency_check_done = true;
+                    updated.save();
+                }
             }
             MainAction::Update => {
                 handle_self_update(true).await?;
@@ -2764,6 +3205,49 @@ mod main_tests {
                 .collect::<Vec<_>>(),
             vec!["s2e01", "s2e02"]
         );
+    }
+
+    #[test]
+    fn completed_watch_entry_continues_with_the_next_episode() {
+        let episode = |id: &str, title: &str| crate::models::Episode {
+            id: id.into(),
+            title: title.into(),
+            is_series: true,
+        };
+        let entry = crate::models::WatchEntry {
+            movie: crate::models::Movie {
+                id: "series".into(),
+                title: "Test Series".into(),
+                total_episodes: None,
+            },
+            episode: episode("2", "Episode 2"),
+            provider_type: PROVIDER_IDLIX,
+            position_seconds: 0,
+            completed: true,
+            updated_at: 1,
+        };
+        let episodes = vec![
+            episode("1", "Episode 1"),
+            episode("2", "Episode 2"),
+            episode("3", "Episode 3"),
+        ];
+
+        let next = next_watch_entry(&entry, &episodes).expect("next episode should exist");
+        assert_eq!(next.episode.id, "3");
+        assert_eq!(next.position_seconds, 0);
+        assert!(!next.completed);
+
+        let unfinished = crate::models::WatchEntry {
+            completed: false,
+            ..entry.clone()
+        };
+        assert!(next_watch_entry(&unfinished, &episodes).is_none());
+
+        let last = crate::models::WatchEntry {
+            episode: episode("3", "Episode 3"),
+            ..entry
+        };
+        assert!(next_watch_entry(&last, &episodes).is_none());
     }
 
     #[test]

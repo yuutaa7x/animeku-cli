@@ -105,6 +105,12 @@ pub struct Config {
     /// Last folder used for episode downloads. `None` means use the platform
     /// Downloads directory with an `Animeku-CLI` subfolder.
     pub download_dir: Option<String>,
+    /// Load the provider subtitle into the player when one is available.
+    pub subtitles: bool,
+    /// First-run guide has already chosen provider/player defaults.
+    pub onboarding_done: bool,
+    /// The one-time dependency health check has already been shown.
+    pub dependency_check_done: bool,
 }
 
 impl Default for Config {
@@ -119,6 +125,9 @@ impl Default for Config {
             show_posters: true,
             embed_subtitles: false,
             download_dir: None,
+            subtitles: true,
+            onboarding_done: false,
+            dependency_check_done: false,
         }
     }
 }
@@ -129,6 +138,14 @@ impl Config {
             PlayerChoice::Ask => self.last_player.unwrap_or(PlayerChoice::Mpv),
             player => player,
         }
+    }
+
+    /// Show the dependency screen once when terminal playback is expected but
+    /// MPV is missing. Browser users are not interrupted by an MPV warning.
+    pub fn needs_dependency_check(&self, has_mpv: bool) -> bool {
+        !has_mpv
+            && !self.dependency_check_done
+            && self.effective_player() != PlayerChoice::Browser
     }
 
     pub fn path() -> PathBuf {
@@ -189,6 +206,9 @@ mod tests {
             show_posters: false,
             embed_subtitles: true,
             download_dir: Some("/tmp/animeku".to_string()),
+            subtitles: false,
+            onboarding_done: true,
+            dependency_check_done: true,
         };
         let encoded = serde_json::to_string(&config).unwrap();
         let decoded: Config = serde_json::from_str(&encoded).unwrap();
@@ -200,6 +220,35 @@ mod tests {
         assert!(decoded.compact_banner);
         assert!(!decoded.show_posters);
         assert!(decoded.embed_subtitles);
+        assert!(!decoded.subtitles);
+        assert!(decoded.onboarding_done);
+        assert!(decoded.dependency_check_done);
         assert_eq!(decoded.download_dir.as_deref(), Some("/tmp/animeku"));
+    }
+
+    #[test]
+    fn dependency_check_is_skipped_for_browser_and_after_first_run() {
+        let mut config = Config::default();
+        assert!(config.needs_dependency_check(false));
+        assert!(!config.needs_dependency_check(true));
+
+        config.player = PlayerChoice::Browser;
+        assert!(!config.needs_dependency_check(false));
+
+        config.player = PlayerChoice::Mpv;
+        config.dependency_check_done = true;
+        assert!(!config.needs_dependency_check(false));
+    }
+
+    #[test]
+    fn older_config_without_new_fields_still_loads() {
+        let decoded: Config = serde_json::from_str(
+            r#"{"player":"mpv","last_player":"mpv","auto_next":"ask","provider":"auto","rpc":true,"compact_banner":false,"show_posters":true,"embed_subtitles":false,"download_dir":null}"#,
+        )
+        .unwrap();
+        assert_eq!(decoded.player, PlayerChoice::Mpv);
+        assert!(decoded.subtitles);
+        assert!(!decoded.onboarding_done);
+        assert!(!decoded.dependency_check_done);
     }
 }

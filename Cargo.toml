@@ -1,6 +1,6 @@
 [package]
 name = "animeku-cli"
-version = "0.4.2"
+version = "0.5.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -39,3 +39,6 @@ dirs = "7.0.0"
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 tokio-stream = "0.1.19"
 futures = "0.3.34"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
