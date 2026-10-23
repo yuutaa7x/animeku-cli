@@ -160,6 +160,12 @@ Untuk Windows, hapus `animeku-cli.exe` dan `animeku.exe` dari `%USERPROFILE%\.ca
 
 ### Changelog
 
+#### v0.5.5 — Daftar batch rapi di mode raw & tanpa chat gateway (23 Oktober 2026)
+
+- Baris daftar batch tidak lagi menumpuk seperti tangga. Selama unduhan terminal berada di raw mode, jadi baris baru sekarang ditulis dengan `\r\n` eksplisit.
+- Pesan teknis Idlix ("Menghubungkan ke Idlix Gateway", hitungan "Menunggu proteksi stream", "Mengklaim sesi pemutaran", notifikasi subtitle, "Berhasil!") disembunyikan saat batch berjalan. Di luar batch pesan itu tetap tampil.
+- Jeda proteksi stream 8 detik tetap dijalankan, hanya tampilannya yang hilang; baris episode aktif tetap menunjukkan status unduh.
+
 #### v0.5.4 — Folder per anime & daftar batch yang tidak lagi menumpuk (23 Oktober 2026)
 
 - Batch download sekarang membuat subfolder sesuai judul anime di dalam folder download, jadi tiap seri punya foldernya sendiri dan tidak bercampur dengan judul lain.

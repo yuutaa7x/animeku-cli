@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use colored::Colorize;
@@ -24,6 +25,18 @@ where
         eprintln!("{}", message.into());
     }
     future.await
+}
+
+static QUIET: AtomicBool = AtomicBool::new(false);
+
+/// Suppresses provider chatter (gateway handshake, subtitle notices) while the
+/// batch screen owns the terminal.
+pub fn set_quiet(quiet: bool) {
+    QUIET.store(quiet, Ordering::Relaxed);
+}
+
+pub fn is_quiet() -> bool {
+    QUIET.load(Ordering::Relaxed)
 }
 
 pub fn custom_theme() -> ColorfulTheme {
@@ -253,5 +266,14 @@ mod tests {
     #[test]
     fn short_prompts_are_left_unchanged() {
         assert_eq!(fit_prompt_to_width("Timpa file?", 80), "Timpa file?");
+    }
+
+    #[test]
+    fn quiet_flag_round_trips() {
+        assert!(!is_quiet());
+        set_quiet(true);
+        assert!(is_quiet());
+        set_quiet(false);
+        assert!(!is_quiet());
     }
 }

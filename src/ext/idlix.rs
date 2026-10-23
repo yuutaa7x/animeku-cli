@@ -342,8 +342,11 @@ impl Ext for Idlix {
         let content_type = parts[0];
         let content_id = parts[1];
 
-        print!("{} Menghubungkan ke Idlix Gateway...", "◆".blue());
-        stdout().flush()?;
+        let quiet = crate::util::is_quiet();
+        if !quiet {
+            print!("{} Menghubungkan ke Idlix Gateway...", "◆".blue());
+            stdout().flush()?;
+        }
 
         let info_url = format!(
             "{}/api/watch/play-info/{}/{}",
@@ -370,18 +373,30 @@ impl Ext for Idlix {
         let wait_secs = (wait_ms as f64 / 1000.0).ceil() as u64;
 
         if wait_secs > 0 {
-            println!();
+            if !quiet {
+                println!();
+            }
             for s in (1..=wait_secs).rev() {
-                print!("\r{} Menunggu proteksi stream terbuka... ({}s) ", "◆".yellow(), s);
-                stdout().flush()?;
+                if !quiet {
+                    print!(
+                        "\r{} Menunggu proteksi stream terbuka... ({}s) ",
+                        "◆".yellow(),
+                        s
+                    );
+                    stdout().flush()?;
+                }
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
-            println!();
+            if !quiet {
+                println!();
+            }
         }
 
         // Claim session
-        print!("{} Mengklaim sesi pemutaran...", "◆".blue());
-        stdout().flush()?;
+        if !quiet {
+            print!("{} Mengklaim sesi pemutaran...", "◆".blue());
+            stdout().flush()?;
+        }
 
         let claim_url = format!("{}/api/watch/session/claim", self.base_url);
         let claim_payload = serde_json::json!({
@@ -434,7 +449,9 @@ impl Ext for Idlix {
                 if let Some(sub_path) = sub["path"].as_str() {
                     if let Ok(vtt_text) = curl_get(sub_path) {
                         let _ = fs::write(&sub_file, vtt_text);
-                        println!(" {} Subtitle Indonesia berhasil dimuat.", "✓".green());
+                        if !quiet {
+                            println!(" {} Subtitle Indonesia berhasil dimuat.", "✓".green());
+                        }
                     }
                 }
             } else if let Some(first_sub) = subs.first() {
@@ -442,7 +459,9 @@ impl Ext for Idlix {
                 if let Some(sub_path) = first_sub["path"].as_str() {
                     if let Ok(vtt_text) = curl_get(sub_path) {
                         let _ = fs::write(&sub_file, vtt_text);
-                        println!(" {} Subtitle Indo tidak ada di server Idlix, memuat [{}] (tekan 'v' di MPV untuk hide).", "ℹ".yellow(), label);
+                        if !quiet {
+                            println!(" {} Subtitle Indo tidak ada di server Idlix, memuat [{}] (tekan 'v' di MPV untuk hide).", "ℹ".yellow(), label);
+                        }
                     }
                 }
             }
@@ -558,7 +577,9 @@ impl Ext for Idlix {
             });
         }
 
-        println!(" {}", "✓ Berhasil!".green());
+        if !quiet {
+            println!(" {}", "✓ Berhasil!".green());
+        }
         Ok(streams)
     }
 }

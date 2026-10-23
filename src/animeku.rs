@@ -621,6 +621,22 @@ fn batch_progress_bar(ratio: f64) -> String {
     )
 }
 
+/// Resets the provider quiet flag even when `run_batch` returns early with `?`.
+struct BatchQuiet;
+
+impl BatchQuiet {
+    fn enable() -> Self {
+        crate::util::set_quiet(true);
+        Self
+    }
+}
+
+impl Drop for BatchQuiet {
+    fn drop(&mut self) {
+        crate::util::set_quiet(false);
+    }
+}
+
 /// Live list used while a sequential batch runs. Only one episode is active at
 /// a time; the rest stay visible as `pending`, `selesai`, `dilewati`, or
 /// `gagal`, which makes the queue much easier to scan than a single status
@@ -760,7 +776,10 @@ impl BatchListUi {
         execute!(out, MoveTo(0, 0), Clear(ClearType::FromCursorDown)).ok();
         for line in &lines {
             let line = dialoguer::console::truncate_str(line, width, "…");
-            let _ = writeln!(out, "{line}");
+            // Raw mode is on while ffmpeg runs, which turns off the `\n` to
+            // `\r\n` translation. Write the carriage return explicitly or
+            // every frame starts where the previous line ended.
+            let _ = write!(out, "{line}\r\n");
         }
         let _ = out.flush();
     }
@@ -1867,6 +1886,7 @@ impl AnimekuCli {
                 ui.draw();
             }
         }
+        let _quiet = list_enabled.then(BatchQuiet::enable);
         let controls = BatchDownloadControls {
             pause: Arc::clone(&pause),
             ui: list_enabled.then(|| Arc::clone(&ui)),
