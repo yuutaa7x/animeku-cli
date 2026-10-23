@@ -108,6 +108,9 @@ pub struct DownloadedFile {
     pub size: u64,
     /// Unix timestamp from the filesystem, or 0 when unavailable.
     pub modified: u64,
+    /// Sub-folder the file lives in, which is the series title for batch
+    /// downloads. `None` for loose files directly in the download folder.
+    pub series: Option<String>,
 }
 
 /// Video files already present in the configured download folder. This is a
@@ -118,17 +121,42 @@ pub fn downloaded_files() -> Vec<DownloadedFile> {
 }
 
 pub fn downloaded_files_in(directory: &Path) -> Vec<DownloadedFile> {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return Vec::new();
-    };
     let mut files = Vec::new();
+    collect_downloaded_files(directory, None, 2, &mut files);
+    files.sort_by(|left, right| {
+        right
+            .modified
+            .cmp(&left.modified)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    files
+}
+
+/// Reads the download folder and, one level deep, the per-series sub-folders
+/// created by batch downloads.
+fn collect_downloaded_files(
+    directory: &Path,
+    series: Option<&str>,
+    depth: usize,
+    files: &mut Vec<DownloadedFile>,
+) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_file() {
+        if path.is_dir() {
+            if depth == 0 {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string);
+            collect_downloaded_files(&path, name.as_deref().or(series), depth - 1, files);
             continue;
         }
-        let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
-        if file_name.contains(".part.") {
+        if !path.is_file() || is_partial_file(&path) {
             continue;
         }
         let extension = path
@@ -150,15 +178,15 @@ pub fn downloaded_files_in(directory: &Path) -> Vec<DownloadedFile> {
             path,
             size,
             modified,
+            series: series.map(str::to_string),
         });
     }
-    files.sort_by(|left, right| {
-        right
-            .modified
-            .cmp(&left.modified)
-            .then_with(|| left.path.cmp(&right.path))
-    });
-    files
+}
+
+fn is_partial_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains(".part."))
 }
 
 /// Prompt for destination and filename, then download the selected stream.
@@ -307,6 +335,10 @@ fn download_to_path_inner(
             output_path.display()
         );
     }
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("gagal membuat folder '{}'", parent.display()))?;
+    }
 
     let audio = if provider_type == ext::PROVIDER_IDLIX && !util::is_android() {
         let path = util::temp_file("animeku_idlix_audio.m3u8");
@@ -389,7 +421,9 @@ pub fn batch_output_path(
     episode: &Episode,
     directory: &Path,
 ) -> PathBuf {
-    directory.join(suggested_filename(provider_type, stream, movie, episode))
+    directory
+        .join(sanitize_filename(&crate::models::clean_movie_title(&movie.title)))
+        .join(suggested_filename(provider_type, stream, movie, episode))
 }
 
 fn prompt_text(prompt: &str, initial: &str) -> Result<Option<String>> {
@@ -1325,7 +1359,7 @@ mod tests {
         );
         assert_eq!(
             path,
-            PathBuf::from("/tmp/animeku/Solo Leveling - Episode 3.mp4")
+            PathBuf::from("/tmp/animeku/Solo Leveling/Solo Leveling - Episode 3.mp4")
         );
     }
 
@@ -1571,6 +1605,8 @@ mod live_smoke_tests {
         fs::write(dir.join("episode-2.mp4"), b"video").unwrap();
         fs::write(dir.join("episode-3.part.mp4"), b"partial").unwrap();
         fs::write(dir.join("catatan.txt"), b"not a video").unwrap();
+        fs::create_dir_all(dir.join("Judul Seri")).unwrap();
+        fs::write(dir.join("Judul Seri").join("Judul Seri - Episode 1.mp4"), b"video").unwrap();
 
         let files = downloaded_files_in(&dir);
         let mut names = files
@@ -1578,7 +1614,19 @@ mod live_smoke_tests {
             .map(|file| file.path.file_name().unwrap().to_string_lossy().to_string())
             .collect::<Vec<_>>();
         names.sort();
-        assert_eq!(names, vec!["episode-1.mkv", "episode-2.mp4"]);
+        assert_eq!(
+            names,
+            vec![
+                "Judul Seri - Episode 1.mp4",
+                "episode-1.mkv",
+                "episode-2.mp4"
+            ]
+        );
+        let series_file = files
+            .iter()
+            .find(|file| file.series.is_some())
+            .expect("file di sub-folder harus punya nama seri");
+        assert_eq!(series_file.series.as_deref(), Some("Judul Seri"));
 
         let _ = fs::remove_dir_all(&dir);
     }

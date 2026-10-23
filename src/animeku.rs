@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use colored::Colorize;
 use crossterm::{
-    cursor::MoveToPreviousLine,
+    cursor::MoveTo,
     execute,
     terminal::{Clear, ClearType},
 };
@@ -595,6 +595,7 @@ fn print_batch_status(
 
 const BATCH_PROGRESS_BAR_WIDTH: usize = 10;
 const BATCH_MAX_VISIBLE_ROWS: usize = 12;
+const BATCH_MAX_LOG_LINES: usize = 3;
 
 fn batch_episode_label(index: usize, episode: &Episode) -> String {
     if let Some((season, number)) = crate::episode::parse_season_episode(&episode.title) {
@@ -625,11 +626,12 @@ fn batch_progress_bar(ratio: f64) -> String {
 /// `gagal`, which makes the queue much easier to scan than a single status
 /// line printed after every episode.
 struct BatchListUi {
+    header: Vec<String>,
+    logs: Vec<String>,
     labels: Vec<String>,
     statuses: Vec<BatchItemStatus>,
     active: Option<usize>,
     progress: DownloadProgress,
-    drawn_lines: usize,
     enabled: bool,
     cancelled: bool,
     last_size: u64,
@@ -643,8 +645,11 @@ impl BatchListUi {
         statuses: &[BatchItemStatus],
         active: Option<usize>,
         enabled: bool,
+        header: Vec<String>,
     ) -> Self {
         Self {
+            header,
+            logs: Vec::new(),
             labels: episodes
                 .iter()
                 .enumerate()
@@ -653,7 +658,6 @@ impl BatchListUi {
             statuses: statuses.to_vec(),
             active,
             progress: DownloadProgress::default(),
-            drawn_lines: 0,
             enabled,
             cancelled: false,
             last_size: 0,
@@ -715,36 +719,20 @@ impl BatchListUi {
             println!("{message}");
             return;
         }
-        self.clear_block();
-        println!("{message}");
-        self.drawn_lines = 0;
+        self.logs.push(message.to_string());
+        let keep = BATCH_MAX_LOG_LINES.min(self.logs.len());
+        let excess = self.logs.len() - keep;
+        self.logs.drain(..excess);
         self.draw();
     }
 
     fn finish(&mut self) {
         self.draw();
-        self.drawn_lines = 0;
     }
 
-    fn clear_block(&mut self) {
-        if !self.enabled || self.drawn_lines == 0 {
-            return;
-        }
-        let mut out = stdout();
-        execute!(out, MoveToPreviousLine(self.drawn_lines as u16)).ok();
-        for index in 0..self.drawn_lines {
-            execute!(out, Clear(ClearType::CurrentLine)).ok();
-            if index + 1 < self.drawn_lines {
-                let _ = writeln!(out);
-            }
-        }
-        if self.drawn_lines > 1 {
-            execute!(out, MoveToPreviousLine((self.drawn_lines - 1) as u16)).ok();
-        }
-        let _ = out.flush();
-        self.drawn_lines = 0;
-    }
-
+    /// The batch screen owns the terminal, so every frame is drawn from the
+    /// top-left corner. Relative cursor moves broke whenever something else
+    /// printed a line (proxy messages, errors), which duplicated rows.
     fn draw(&mut self) {
         if !self.enabled || self.labels.is_empty() {
             return;
@@ -755,36 +743,26 @@ impl BatchListUi {
             .unwrap_or(80)
             .saturating_sub(1)
             .max(20);
-        let lines = (start..end)
-            .map(|index| {
-                let line = self.row(index);
-                dialoguer::console::truncate_str(&line, width, "…").into_owned()
-            })
-            .collect::<Vec<_>>();
+
+        let mut lines = self.header.clone();
+        if !self.header.is_empty() {
+            lines.push(String::new());
+        }
+        for index in start..end {
+            lines.push(self.row(index));
+        }
+        if !self.logs.is_empty() {
+            lines.push(String::new());
+            lines.extend(self.logs.iter().cloned());
+        }
 
         let mut out = stdout();
-        let old_lines = self.drawn_lines;
-        if old_lines > 0 {
-            execute!(out, MoveToPreviousLine(old_lines as u16)).ok();
-        }
+        execute!(out, MoveTo(0, 0), Clear(ClearType::FromCursorDown)).ok();
         for line in &lines {
-            execute!(out, Clear(ClearType::CurrentLine)).ok();
+            let line = dialoguer::console::truncate_str(line, width, "…");
             let _ = writeln!(out, "{line}");
         }
-        if lines.len() < old_lines {
-            for index in lines.len()..old_lines {
-                execute!(out, Clear(ClearType::CurrentLine)).ok();
-                if index + 1 < old_lines {
-                    let _ = writeln!(out);
-                }
-            }
-            let move_up = old_lines.saturating_sub(lines.len() + 1);
-            if move_up > 0 {
-                execute!(out, MoveToPreviousLine(move_up as u16)).ok();
-            }
-        }
         let _ = out.flush();
-        self.drawn_lines = lines.len();
     }
 
     fn visible_range(&self) -> (usize, usize) {
@@ -1871,11 +1849,18 @@ impl AnimekuCli {
         let pause = Arc::new(AtomicBool::new(false));
 
         let list_enabled = stdout().is_terminal() && crossterm::terminal::size().is_ok();
+        let header = vec![format!(
+            "◆ Batch download: {} episode • kualitas '{}' • folder '{}'",
+            total,
+            queue.target_quality,
+            directory.display()
+        )];
         let ui = Arc::new(Mutex::new(BatchListUi::new(
             &queue.episodes,
             &queue.statuses,
             None,
             list_enabled,
+            header,
         )));
         if list_enabled {
             if let Ok(mut ui) = ui.lock() {
@@ -2880,7 +2865,7 @@ mod tests {
     fn batch_list_shows_pending_and_live_progress_rows() {
         let episodes = episode_list(2);
         let statuses = vec![BatchItemStatus::Pending; 2];
-        let mut ui = BatchListUi::new(&episodes, &statuses, None, false);
+        let mut ui = BatchListUi::new(&episodes, &statuses, None, false, Vec::new());
 
         assert_eq!(
             ui.row(0),

@@ -160,7 +160,9 @@ struct LocalGroup {
 /// Batch downloads name files `Judul - Episode N.ext`. Anything else becomes a
 /// one-file group so hand-copied videos still show up.
 fn split_series_name(stem: &str) -> Option<(&str, &str)> {
-    let (title, rest) = stem.rsplit_once(" - ")?;
+    // Split on the first separator: batch names look like
+    // `Judul - S1E06 - Judul Episode`, so the episode number is in the middle.
+    let (title, rest) = stem.split_once(" - ")?;
     let is_episode = rest.to_ascii_lowercase().starts_with("episode")
         || crate::episode::parse_season_episode(rest).is_some();
     if !is_episode {
@@ -169,32 +171,40 @@ fn split_series_name(stem: &str) -> Option<(&str, &str)> {
     Some((title.trim(), rest.trim()))
 }
 
-fn episode_sort_key(file: &crate::download::DownloadedFile) -> (u32, u32) {
-    let stem = file
-        .path
+fn file_stem(file: &crate::download::DownloadedFile) -> &str {
+    file.path
         .file_stem()
         .and_then(|stem| stem.to_str())
-        .unwrap_or("");
-    let Some((_, rest)) = split_series_name(stem) else {
-        return (0, 0);
+        .unwrap_or("")
+}
+
+fn series_title(file: &crate::download::DownloadedFile) -> String {
+    if let Some(series) = &file.series {
+        return series.clone();
+    }
+    let stem = file_stem(file);
+    split_series_name(stem)
+        .map(|(title, _)| title.to_string())
+        .unwrap_or_else(|| stem.to_string())
+}
+
+fn episode_sort_key(file: &crate::download::DownloadedFile) -> (u32, u32) {
+    let stem = file_stem(file);
+    let candidate = if file.series.is_some() {
+        stem
+    } else {
+        split_series_name(stem).map(|(_, rest)| rest).unwrap_or(stem)
     };
-    if let Some((season, episode)) = crate::episode::parse_season_episode(rest) {
+    if let Some((season, episode)) = crate::episode::parse_season_episode(candidate) {
         return (season, episode);
     }
-    (1, crate::episode::episode_number(rest).unwrap_or(0))
+    (1, crate::episode::episode_number(candidate).unwrap_or(0))
 }
 
 fn local_groups(files: &[crate::download::DownloadedFile]) -> Vec<LocalGroup> {
     let mut groups: Vec<LocalGroup> = Vec::new();
     for file in files {
-        let stem = file
-            .path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("");
-        let title = split_series_name(stem)
-            .map(|(title, _)| title.to_string())
-            .unwrap_or_else(|| stem.to_string());
+        let title = series_title(file);
         match groups
             .iter_mut()
             .find(|group| group.title.eq_ignore_ascii_case(&title))
@@ -263,13 +273,15 @@ fn local_group_label(group: &LocalGroup) -> String {
 }
 
 fn local_episode_name(file: &crate::download::DownloadedFile) -> String {
-    let stem = file
-        .path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("(tanpa nama)");
+    let stem = file_stem(file);
+    if let Some(series) = &file.series {
+        if let Some(rest) = stem.strip_prefix(&format!("{series} - ")) {
+            return rest.to_string();
+        }
+    }
     match split_series_name(stem) {
         Some((_, rest)) => rest.to_string(),
+        None if stem.is_empty() => "(tanpa nama)".to_string(),
         None => stem.to_string(),
     }
 }
@@ -640,6 +652,7 @@ mod tests {
             path: PathBuf::from("/tmp/animeku").join(name),
             size: 10,
             modified: 0,
+            series: None,
         }
     }
 
@@ -666,6 +679,44 @@ mod tests {
         );
         assert_eq!(groups[1].title, "Film Lepas");
         assert_eq!(groups[1].episodes.len(), 1);
+    }
+
+    #[test]
+    fn local_groups_use_series_folders_and_split_episode_titles() {
+        let files = vec![
+            crate::download::DownloadedFile {
+                path: PathBuf::from("/tmp/animeku/Takopi/Takopi - S1E06 - To All of You.mp4"),
+                size: 10,
+                modified: 0,
+                series: Some("Takopi".to_string()),
+            },
+            crate::download::DownloadedFile {
+                path: PathBuf::from("/tmp/animeku/Takopi/Takopi - S1E02 - Kedua.mp4"),
+                size: 10,
+                modified: 0,
+                series: Some("Takopi".to_string()),
+            },
+        ];
+        let groups = local_groups(&files);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].title, "Takopi");
+        let order = groups[0]
+            .episodes
+            .iter()
+            .map(local_episode_name)
+            .collect::<Vec<_>>();
+        assert_eq!(order, vec!["S1E02 - Kedua", "S1E06 - To All of You"]);
+    }
+
+    #[test]
+    fn loose_files_split_on_the_first_separator() {
+        let file = file("Takopi's Original Sin - S1E06 - To All of You.mp4");
+        assert_eq!(
+            local_episode_name(&file),
+            "S1E06 - To All of You"
+        );
+        let groups = local_groups(&[file]);
+        assert_eq!(groups[0].title, "Takopi's Original Sin");
     }
 
     #[test]

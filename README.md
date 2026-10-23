@@ -132,14 +132,14 @@ Untuk Windows, hapus `animeku-cli.exe` dan `animeku.exe` dari `%USERPROFILE%\.ca
 - Hasil pencarian lengkap dengan pilihan server & resolusi (1080p, 720p, 480p, 360p).
 - Otomatis memuat Subtitle Indonesia langsung ke player.
 - Download episode dengan pilihan kualitas/server, progress bar, nama file kustom, dan folder tujuan.
-- Download batch/rentang episode dengan antrean berurutan, kualitas otomatis mengikuti pilihan awal, tampilan daftar per episode (`[1/6] E01` + progress bar, persen, dan kecepatan), status `pending`/`selesai`/`dilewati`/`gagal`, serta opsi lewati/timpa file yang sudah ada.
+- Download batch/rentang episode dengan antrean berurutan, otomatis disimpan ke subfolder bernama judul anime (misal `Animeku-CLI/Takopi/`), kualitas otomatis mengikuti pilihan awal, tampilan daftar per episode (`[1/6] E01` + progress bar, persen, dan kecepatan), status `pending`/`selesai`/`dilewati`/`gagal`, serta opsi lewati/timpa file yang sudah ada.
 - Antrean batch disimpan otomatis ke `~/.animeku_batch_queue.json`. Kalau download dibatalkan, dijeda, atau gagal, menu **Kelola Download** dan opsi di pemilih episode bisa melanjutkan item yang belum selesai tanpa mengunduh ulang episode yang sudah beres.
 - Retry batch 3 kali dengan exponential backoff (1s, 2s). Episode yang tetap gagal dicatat ke `animeku-batch.log` di folder download, lalu dicoba lagi saat batch dilanjutkan.
 - Batch berhenti dengan aman kalau ruang disk hampir habis. Ukuran episode yang sudah selesai dipakai untuk menaksir kebutuhan episode berikutnya, sehingga antrean tidak gagal di tengah file. Berlaku di Linux, macOS, dan Windows.
 - Download bisa dibatalkan dengan `Esc`, `q`, atau `Ctrl+C`; ffmpeg dihentikan, file `.part` dibersihkan, dan ringkasan parsial ditampilkan.
 - Download batch bisa dijeda dengan `p`. Di Linux/macOS proses ffmpeg langsung di-`SIGSTOP`/`SIGCONT`; di platform lain batch berhenti dengan aman setelah episode saat ini.
 - **Kelola Download** menampilkan status tiap episode, retry semua episode gagal, membuka folder download, menghapus antrean, dan melanjutkan item yang tertunda.
-- **Terunduh** di menu utama memindai folder download dan mengelompokkan file per judul (contoh `Solo Leveling` berisi Episode 1–12), terbaru lebih dulu. Dari situ episode bisa diputar, dilanjutkan dari posisi terakhir (MPV), lanjut ke episode berikutnya, dibuka foldernya, atau dihapus beserta subtitle `.vtt` dan penanda posisinya.
+- **Terunduh** di menu utama memindai folder download beserta subfolder per anime, lalu mengelompokkan file per judul (contoh `Takopi` berisi Episode 1–12), terbaru lebih dulu. File lama yang masih menumpuk di folder utama tetap dikenali dari nama `Judul - Episode N`. Dari situ episode bisa diputar, dilanjutkan dari posisi terakhir (MPV), lanjut ke episode berikutnya, dibuka foldernya, atau dihapus beserta subtitle `.vtt` dan penanda posisinya.
 - Subtitle `.vtt` disimpan sebagai sidecar secara default. Pengaturan **Embed subtitle** bisa menanam subtitle langsung ke `.mkv`/`.mp4` (SRT/mov_text) agar video dan subtitle jadi satu file.
 - Subtitle saat memutar bisa dinyalakan/dimatikan dari Pengaturan. Saat memutar di MPV, tombol `n` langsung meminta episode berikutnya tanpa menunggu prompt.
 - Terintegrasi dengan Discord Rich Presence (RPC).
@@ -159,6 +159,13 @@ Untuk Windows, hapus `animeku-cli.exe` dan `animeku.exe` dari `%USERPROFILE%\.ca
 - **Jelajahi anime (AniList)** menampilkan trending anime, anime musim ini, jelajah genre, skor, tahun, genre, dan sinopsis. Detail AniList juga bisa dibuka dari watchlist.
 
 ### Changelog
+
+#### v0.5.4 — Folder per anime & daftar batch yang tidak lagi menumpuk (23 Oktober 2026)
+
+- Batch download sekarang membuat subfolder sesuai judul anime di dalam folder download, jadi tiap seri punya foldernya sendiri dan tidak bercampur dengan judul lain.
+- **Terunduh** membaca subfolder tersebut dan mengelompokkan episode per seri. File lama yang masih di folder utama tetap dikenali lewat pola `Judul - Episode N`, termasuk nama seperti `Judul - S1E06 - Judul Episode`.
+- Daftar progres batch digambar ulang dari sudut kiri atas layar, sehingga pesan lain (misalnya "Menghubungkan ke Idlix Gateway...") tidak lagi menggeser dan menggandakan baris. Maksimal 3 pesan log terakhir ditampilkan di bawah daftar.
+- Penanda posisi `.pos` tidak ikut terdaftar sebagai video.
 
 #### v0.5.3 — Koleksi offline & pengaman ruang disk (23 Oktober 2026)
 
