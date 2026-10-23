@@ -160,6 +160,10 @@ Untuk Windows, hapus `animeku-cli.exe` dan `animeku.exe` dari `%USERPROFILE%\.ca
 
 ### Changelog
 
+#### v0.5.6 — Daftar batch muncul saat unduhan benar-benar mulai (23 Oktober 2026)
+
+- Baris daftar episode tidak lagi tampil selama proses menghubungkan ke gateway dan menunggu proteksi stream. Yang terlihat hanya judul batch; daftar muncul begitu byte pertama mulai terunduh, jadi tidak ada lagi baris `0%` yang terlihat macet.
+
 #### v0.5.5 — Daftar batch rapi di mode raw & tanpa chat gateway (23 Oktober 2026)
 
 - Baris daftar batch tidak lagi menumpuk seperti tangga. Selama unduhan terminal berada di raw mode, jadi baris baru sekarang ditulis dengan `\r\n` eksplisit.

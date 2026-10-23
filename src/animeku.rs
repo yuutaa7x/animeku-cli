@@ -650,6 +650,9 @@ struct BatchListUi {
     progress: DownloadProgress,
     enabled: bool,
     cancelled: bool,
+    /// Rows stay hidden until the first real download progress arrives, so the
+    /// gateway handshake cannot look like a stalled 0% download.
+    started: bool,
     last_size: u64,
     last_rate_at: Instant,
     bytes_per_sec: f64,
@@ -676,6 +679,7 @@ impl BatchListUi {
             progress: DownloadProgress::default(),
             enabled,
             cancelled: false,
+            started: false,
             last_size: 0,
             last_rate_at: Instant::now(),
             bytes_per_sec: 0.0,
@@ -689,10 +693,13 @@ impl BatchListUi {
         self.last_size = 0;
         self.last_rate_at = Instant::now();
         self.bytes_per_sec = 0.0;
-        self.draw();
+        // No redraw here: the provider still has to resolve the stream, and a
+        // 0% row during that handshake looks like a stalled download. The list
+        // appears on the first progress tick instead.
     }
 
     fn set_progress(&mut self, progress: DownloadProgress) {
+        self.started = true;
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_rate_at).as_secs_f64();
         if elapsed >= 0.20 {
@@ -716,6 +723,7 @@ impl BatchListUi {
     }
 
     fn set_status(&mut self, index: usize, status: BatchItemStatus) {
+        self.started = true;
         if let Some(slot) = self.statuses.get_mut(index) {
             *slot = status;
         }
@@ -727,6 +735,7 @@ impl BatchListUi {
 
     fn mark_cancelled(&mut self) {
         self.cancelled = true;
+        self.started = true;
         self.draw();
     }
 
@@ -743,6 +752,7 @@ impl BatchListUi {
     }
 
     fn finish(&mut self) {
+        self.started = true;
         self.draw();
     }
 
@@ -761,15 +771,17 @@ impl BatchListUi {
             .max(20);
 
         let mut lines = self.header.clone();
-        if !self.header.is_empty() {
-            lines.push(String::new());
-        }
-        for index in start..end {
-            lines.push(self.row(index));
-        }
-        if !self.logs.is_empty() {
-            lines.push(String::new());
-            lines.extend(self.logs.iter().cloned());
+        if self.started {
+            if !self.header.is_empty() {
+                lines.push(String::new());
+            }
+            for index in start..end {
+                lines.push(self.row(index));
+            }
+            if !self.logs.is_empty() {
+                lines.push(String::new());
+                lines.extend(self.logs.iter().cloned());
+            }
         }
 
         let mut out = stdout();
@@ -1881,12 +1893,12 @@ impl AnimekuCli {
             list_enabled,
             header,
         )));
+        let _quiet = list_enabled.then(BatchQuiet::enable);
         if list_enabled {
             if let Ok(mut ui) = ui.lock() {
                 ui.draw();
             }
         }
-        let _quiet = list_enabled.then(BatchQuiet::enable);
         let controls = BatchDownloadControls {
             pause: Arc::clone(&pause),
             ui: list_enabled.then(|| Arc::clone(&ui)),
