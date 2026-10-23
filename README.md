@@ -135,10 +135,11 @@ Untuk Windows, hapus `animeku-cli.exe` dan `animeku.exe` dari `%USERPROFILE%\.ca
 - Download batch/rentang episode dengan antrean berurutan, kualitas otomatis mengikuti pilihan awal, tampilan daftar per episode (`[1/6] E01` + progress bar, persen, dan kecepatan), status `pending`/`selesai`/`dilewati`/`gagal`, serta opsi lewati/timpa file yang sudah ada.
 - Antrean batch disimpan otomatis ke `~/.animeku_batch_queue.json`. Kalau download dibatalkan, dijeda, atau gagal, menu **Kelola Download** dan opsi di pemilih episode bisa melanjutkan item yang belum selesai tanpa mengunduh ulang episode yang sudah beres.
 - Retry batch 3 kali dengan exponential backoff (1s, 2s). Episode yang tetap gagal dicatat ke `animeku-batch.log` di folder download, lalu dicoba lagi saat batch dilanjutkan.
+- Batch berhenti dengan aman kalau ruang disk hampir habis. Ukuran episode yang sudah selesai dipakai untuk menaksir kebutuhan episode berikutnya, sehingga antrean tidak gagal di tengah file. Berlaku di Linux, macOS, dan Windows.
 - Download bisa dibatalkan dengan `Esc`, `q`, atau `Ctrl+C`; ffmpeg dihentikan, file `.part` dibersihkan, dan ringkasan parsial ditampilkan.
 - Download batch bisa dijeda dengan `p`. Di Linux/macOS proses ffmpeg langsung di-`SIGSTOP`/`SIGCONT`; di platform lain batch berhenti dengan aman setelah episode saat ini.
 - **Kelola Download** menampilkan status tiap episode, retry semua episode gagal, membuka folder download, menghapus antrean, dan melanjutkan item yang tertunda.
-- **Terunduh** di menu utama memindai folder download, menampilkan video terbaru lebih dulu (ukuran + waktu unduh), lalu bisa langsung diputar, dibuka foldernya, atau dihapus beserta subtitle `.vtt`-nya.
+- **Terunduh** di menu utama memindai folder download dan mengelompokkan file per judul (contoh `Solo Leveling` berisi Episode 1–12), terbaru lebih dulu. Dari situ episode bisa diputar, dilanjutkan dari posisi terakhir (MPV), lanjut ke episode berikutnya, dibuka foldernya, atau dihapus beserta subtitle `.vtt` dan penanda posisinya.
 - Subtitle `.vtt` disimpan sebagai sidecar secara default. Pengaturan **Embed subtitle** bisa menanam subtitle langsung ke `.mkv`/`.mp4` (SRT/mov_text) agar video dan subtitle jadi satu file.
 - Subtitle saat memutar bisa dinyalakan/dimatikan dari Pengaturan. Saat memutar di MPV, tombol `n` langsung meminta episode berikutnya tanpa menunggu prompt.
 - Terintegrasi dengan Discord Rich Presence (RPC).
@@ -158,6 +159,14 @@ Untuk Windows, hapus `animeku-cli.exe` dan `animeku.exe` dari `%USERPROFILE%\.ca
 - **Jelajahi anime (AniList)** menampilkan trending anime, anime musim ini, jelajah genre, skor, tahun, genre, dan sinopsis. Detail AniList juga bisa dibuka dari watchlist.
 
 ### Changelog
+
+#### v0.5.3 — Koleksi offline & pengaman ruang disk (23 Oktober 2026)
+
+- **Terunduh** sekarang mengelompokkan file per judul, bukan daftar file mentah. Batch download yang menamai file `Judul - Episode N` otomatis jadi satu seri yang urut; file lain tetap muncul sebagai entri tunggal.
+- Pemutaran file terunduh melanjutkan dari posisi terakhir dan menawarkan episode berikutnya dari folder yang sama, tanpa internet. Posisi disimpan sebagai `<video>.pos` di sebelah file dan ikut terhapus saat file dihapus.
+- Resume posisi hanya untuk MPV. VLC dan aplikasi default tetap mulai dari awal.
+- Batch download mengecek sisa ruang disk sebelum tiap episode, memakai ukuran episode sebelumnya sebagai taksiran. Kalau tidak cukup, batch berhenti dengan pesan jelas dan antrean tetap tersimpan untuk dilanjutkan.
+- Pengecekan disk memakai `statvfs` di Linux/macOS dan `GetDiskFreeSpaceExW` di Windows, tanpa dependensi baru.
 
 #### v0.5.2 — Daftar progres batch & menu Terunduh (23 Oktober 2026)
 

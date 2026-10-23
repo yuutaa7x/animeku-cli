@@ -536,11 +536,16 @@ fn choose_batch_stream<'a>(streams: &'a [Stream], target_title: &str) -> Option<
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BatchItemOutcome {
-    Completed,
+    /// Finished successfully, with the size of the file written in bytes.
+    Completed(u64),
     Skipped,
     Failed(String),
     Cancelled,
 }
+
+/// Stop the queue before an episode when the previous files suggest the disk
+/// cannot hold the next one plus a small safety margin.
+const DISK_MARGIN_BYTES: u64 = 250 * 1024 * 1024;
 
 fn batch_eta(done: usize, total: usize, elapsed: Duration) -> String {
     if done == 0 {
@@ -1801,7 +1806,10 @@ impl AnimekuCli {
             };
             match result {
                 Ok(crate::download::DownloadResult::Completed) => {
-                    return BatchItemOutcome::Completed;
+                    let size = std::fs::metadata(&output)
+                        .map(|metadata| metadata.len())
+                        .unwrap_or(0);
+                    return BatchItemOutcome::Completed(size);
                 }
                 Ok(crate::download::DownloadResult::Cancelled) => {
                     return BatchItemOutcome::Cancelled;
@@ -1855,6 +1863,9 @@ impl AnimekuCli {
         let mut processed = 0usize;
         let mut cancelled = false;
         let mut paused = false;
+        let mut disk_full: Option<u64> = None;
+        let mut completed_bytes = 0u64;
+        let mut completed_count = 0u64;
         // Shared with ffmpeg's input listener. `p` pauses on Unix and always
         // stops the queue after the current episode.
         let pause = Arc::new(AtomicBool::new(false));
@@ -1877,6 +1888,17 @@ impl AnimekuCli {
         };
 
         for index in pending {
+            // One finished episode gives a real per-episode size, which is a
+            // better estimate than guessing from the chosen quality.
+            if completed_count > 0 {
+                let per_episode = completed_bytes.checked_div(completed_count).unwrap_or(0);
+                if let Some(free) = crate::download::available_space(&directory) {
+                    if free < per_episode + DISK_MARGIN_BYTES {
+                        disk_full = Some(free);
+                        break;
+                    }
+                }
+            }
             let episode = queue.episodes[index].clone();
             if list_enabled {
                 if let Ok(mut ui) = ui.lock() {
@@ -1904,7 +1926,9 @@ impl AnimekuCli {
                 .await;
 
             match outcome {
-                BatchItemOutcome::Completed => {
+                BatchItemOutcome::Completed(size) => {
+                    completed_bytes += size;
+                    completed_count += 1;
                     queue.mark(index, BatchItemStatus::Completed);
                     if let Ok(mut ui) = ui.lock() {
                         ui.set_status(index, BatchItemStatus::Completed);
@@ -1976,6 +2000,16 @@ impl AnimekuCli {
             println!(
                 "  Antrean disimpan. Pilih menu 'Lanjutkan Batch' untuk melanjutkan nanti."
             );
+        } else if let Some(free) = disk_full {
+            println!(
+                "\n{} Batch dihentikan: ruang disk hampir habis (sisa {}).",
+                "■".yellow(),
+                crate::download::format_bytes(free)
+            );
+            println!(
+                "  Kosongkan folder download, lalu pilih 'Lanjutkan' untuk melanjutkan. Antrean disimpan."
+            );
+            let _ = queue.save();
         } else if paused {
             println!(
                 "\n{} Batch dijeda: {} berhasil • {} dilewati • {} gagal • {} tertunda ({}).",

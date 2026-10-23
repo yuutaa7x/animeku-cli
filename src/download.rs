@@ -1162,6 +1162,63 @@ fn clear_progress_line() {
     let _ = std::io::stdout().flush();
 }
 
+/// Free bytes on the filesystem holding `path`, or `None` when the platform
+/// call fails. Used before each batch episode so a full disk stops the queue
+/// instead of failing halfway through a file.
+pub(crate) fn available_space(path: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    let space = unix_available_space(path);
+    #[cfg(windows)]
+    let space = windows_available_space(path);
+    #[cfg(not(any(unix, windows)))]
+    let space = None;
+    space
+}
+
+#[cfg(unix)]
+fn unix_available_space(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: statvfs only writes into the struct we pass.
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
+        return None;
+    }
+    Some(stat.f_bavail as u64 * stat.f_frsize as u64)
+}
+
+#[cfg(windows)]
+fn windows_available_space(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<u16>>();
+    let mut free = 0u64;
+    // SAFETY: `wide` is NUL-terminated and `free` is a valid out pointer.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut free,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    (ok != 0).then_some(free)
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetDiskFreeSpaceExW(
+        directory: *const u16,
+        free_bytes_available: *mut u64,
+        total_bytes: *mut u64,
+        total_free_bytes: *mut u64,
+    ) -> i32;
+}
+
 pub(crate) fn format_bytes(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
     const MIB: f64 = KIB * 1024.0;
@@ -1491,9 +1548,17 @@ mod live_smoke_tests {
         });
     }
 
+    #[cfg(unix)]
     #[test]
-    fn downloaded_files_lists_only_final_videos() {
-        let stamp = std::time::SystemTime::now()
+    fn available_space_reports_free_bytes() {
+        assert!(
+            available_space(Path::new("/tmp")).unwrap_or(0) > 0,
+            "statvfs should report free bytes for an existing directory"
+        );
+    }
+
+    #[test]
+    fn downloaded_files_lists_only_final_videos() {        let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
