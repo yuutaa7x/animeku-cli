@@ -203,16 +203,33 @@ pub async fn show_image_thumb(url: String) {
     let (rows, columns) = crossterm::terminal::size().unwrap_or((40, 120));
     let width = ((columns as u32 * 35) / 100).clamp(30, 60);
     let height = ((rows as u32 * 45) / 100).clamp(15, 35);
+    let (bound_width, bound_height) = poster_bounds(&image, width, height);
     let conf = viuer::Config {
         transparent: true,
-        width: Some(width),
-        height: Some(height),
+        width: bound_width,
+        height: bound_height,
         y: 8,
         x: 2,
         ..Default::default()
     };
     if viuer::print(&image, &conf).is_ok() {
         println!();
+    }
+}
+
+/// viuer stretches the image when `Config` has both dimensions, so hand it the
+/// single dimension that hits the box edge. A terminal cell is twice as tall as
+/// it is wide, hence `2 * height` when comparing against pixel ratios.
+fn poster_bounds(
+    image: &image::DynamicImage,
+    max_width: u32,
+    max_height: u32,
+) -> (Option<u32>, Option<u32>) {
+    let width_needed = max_height as f64 * 2.0 * image.width() as f64 / image.height() as f64;
+    if width_needed <= max_width as f64 {
+        (None, Some(max_height))
+    } else {
+        (Some(max_width), None)
     }
 }
 
@@ -266,6 +283,17 @@ mod tests {
     #[test]
     fn short_prompts_are_left_unchanged() {
         assert_eq!(fit_prompt_to_width("Timpa file?", 80), "Timpa file?");
+    }
+
+    #[test]
+    fn poster_bounds_pick_one_edge_of_the_box() {
+        // A 2:3 movie poster, the shape Idlix/TMDB returns.
+        let poster = image::DynamicImage::ImageRgba8(image::RgbaImage::new(500, 750));
+        assert_eq!(poster_bounds(&poster, 60, 35), (None, Some(35)));
+
+        // A wide still gets the width bound instead.
+        let wide = image::DynamicImage::ImageRgba8(image::RgbaImage::new(1200, 500));
+        assert_eq!(poster_bounds(&wide, 60, 35), (Some(60), None));
     }
 
     #[test]

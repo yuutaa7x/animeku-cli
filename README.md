@@ -160,6 +160,10 @@ Untuk Windows, hapus `animeku-cli.exe` dan `animeku.exe` dari `%USERPROFILE%\.ca
 
 ### Changelog
 
+#### v0.5.7 — Poster episode tidak lagi gepeng (23 Oktober 2026)
+
+- Thumbnail poster di halaman episode sekarang diskalakan mengikuti sisi kotak yang paling sempit, bukan dipaksa mengisi lebar dan tinggi sekaligus. Poster portrait (2:3) tetap proporsional, tidak melebar.
+
 #### v0.5.6 — Daftar batch muncul saat unduhan benar-benar mulai (23 Oktober 2026)
 
 - Baris daftar episode tidak lagi tampil selama proses menghubungkan ke gateway dan menunggu proteksi stream. Yang terlihat hanya judul batch; daftar muncul begitu byte pertama mulai terunduh, jadi tidak ada lagi baris `0%` yang terlihat macet.
