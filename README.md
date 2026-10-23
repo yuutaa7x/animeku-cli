@@ -132,12 +132,13 @@ Untuk Windows, hapus `animeku-cli.exe` dan `animeku.exe` dari `%USERPROFILE%\.ca
 - Hasil pencarian lengkap dengan pilihan server & resolusi (1080p, 720p, 480p, 360p).
 - Otomatis memuat Subtitle Indonesia langsung ke player.
 - Download episode dengan pilihan kualitas/server, progress bar, nama file kustom, dan folder tujuan.
-- Download batch/rentang episode dengan antrean berurutan, kualitas otomatis mengikuti pilihan awal, progres keseluruhan + estimasi sisa waktu, dan opsi lewati/timpa file yang sudah ada.
+- Download batch/rentang episode dengan antrean berurutan, kualitas otomatis mengikuti pilihan awal, tampilan daftar per episode (`[1/6] E01` + progress bar, persen, dan kecepatan), status `pending`/`selesai`/`dilewati`/`gagal`, serta opsi lewati/timpa file yang sudah ada.
 - Antrean batch disimpan otomatis ke `~/.animeku_batch_queue.json`. Kalau download dibatalkan, dijeda, atau gagal, menu **Kelola Download** dan opsi di pemilih episode bisa melanjutkan item yang belum selesai tanpa mengunduh ulang episode yang sudah beres.
 - Retry batch 3 kali dengan exponential backoff (1s, 2s). Episode yang tetap gagal dicatat ke `animeku-batch.log` di folder download, lalu dicoba lagi saat batch dilanjutkan.
 - Download bisa dibatalkan dengan `Esc`, `q`, atau `Ctrl+C`; ffmpeg dihentikan, file `.part` dibersihkan, dan ringkasan parsial ditampilkan.
 - Download batch bisa dijeda dengan `p`. Di Linux/macOS proses ffmpeg langsung di-`SIGSTOP`/`SIGCONT`; di platform lain batch berhenti dengan aman setelah episode saat ini.
 - **Kelola Download** menampilkan status tiap episode, retry semua episode gagal, membuka folder download, menghapus antrean, dan melanjutkan item yang tertunda.
+- **Terunduh** di menu utama memindai folder download, menampilkan video terbaru lebih dulu (ukuran + waktu unduh), lalu bisa langsung diputar, dibuka foldernya, atau dihapus beserta subtitle `.vtt`-nya.
 - Subtitle `.vtt` disimpan sebagai sidecar secara default. Pengaturan **Embed subtitle** bisa menanam subtitle langsung ke `.mkv`/`.mp4` (SRT/mov_text) agar video dan subtitle jadi satu file.
 - Subtitle saat memutar bisa dinyalakan/dimatikan dari Pengaturan. Saat memutar di MPV, tombol `n` langsung meminta episode berikutnya tanpa menunggu prompt.
 - Terintegrasi dengan Discord Rich Presence (RPC).
@@ -157,6 +158,13 @@ Untuk Windows, hapus `animeku-cli.exe` dan `animeku.exe` dari `%USERPROFILE%\.ca
 - **Jelajahi anime (AniList)** menampilkan trending anime, anime musim ini, jelajah genre, skor, tahun, genre, dan sinopsis. Detail AniList juga bisa dibuka dari watchlist.
 
 ### Changelog
+
+#### v0.5.2 — Daftar progres batch & menu Terunduh (23 Oktober 2026)
+
+- Batch download sekarang menampilkan daftar per episode (`[3/12] E05`) dengan progress bar, persen, dan kecepatan untuk episode yang sedang berjalan. Episode lain tetap terlihat sebagai `pending`, `selesai`, `dilewati`, atau `gagal`, jadi tidak perlu menggulir log untuk tahu posisi unduhan.
+- Daftar progres hanya aktif di terminal (TTY). Saat output dialihkan ke file/pipe, tampilan tetap memakai status satu baris seperti sebelumnya.
+- Menu utama **Terunduh** memindai folder download, mengurutkan video dari yang terbaru, dan menyediakan aksi putar (MPV/VLC/aplikasi default), buka folder, dan hapus file beserta subtitle `.vtt`. File `.part` yang belum selesai tidak ikut terdaftar.
+- Jeda/cancel (`p`, `Esc`/`q`/`Ctrl+C`), retry 3x, pembersihan `.part`, dan penyimpanan antrean tidak berubah.
 
 #### v0.5.1 — Perbaikan prompt konfirmasi panjang (22 Oktober 2026)
 

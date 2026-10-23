@@ -1765,6 +1765,243 @@ async fn handle_batch_manager() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn downloaded_file_label(file: &crate::download::DownloadedFile) -> String {
+    let name = file
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("(tanpa nama)");
+    let age = if file.modified > 0 {
+        crate::models::format_relative_time(file.modified)
+    } else {
+        "waktu tidak diketahui".to_string()
+    };
+    format!(
+        "{}  •  {}  •  {}",
+        name,
+        crate::download::format_bytes(file.size),
+        age
+    )
+}
+
+fn open_download_folder(directory: &std::path::Path) {
+    let _ = std::fs::create_dir_all(directory);
+    match open::that(directory) {
+        Ok(()) => println!("{} Membuka '{}'.", "✓".green(), directory.display()),
+        Err(error) => eprintln!(
+            "{} Gagal membuka folder '{}': {}",
+            "■".red(),
+            directory.display(),
+            error
+        ),
+    }
+}
+
+fn pause_for_enter() {
+    println!("\nTekan Enter untuk kembali...");
+    let mut dummy = String::new();
+    let _ = std::io::stdin().read_line(&mut dummy);
+}
+
+fn handle_downloaded_menu() -> anyhow::Result<()> {
+    loop {
+        clearscreen_and_show_banner()?;
+        let directory = crate::download::default_download_dir();
+        let files = crate::download::downloaded_files_in(&directory);
+
+        println!("Terunduh:");
+        println!("  Folder: {}\n", directory.display());
+
+        if files.is_empty() {
+            println!("Belum ada file video yang diunduh.\n");
+            let entries = vec![
+                input::MenuEntry::new("📂 Buka Folder Download"),
+                input::MenuEntry::new("Kembali"),
+            ];
+            let Some(choice) = input::select_menu_simple("Pilih Tindakan:", &entries, 0)? else {
+                break;
+            };
+            if choice == 0 {
+                open_download_folder(&directory);
+                pause_for_enter();
+                continue;
+            }
+            break;
+        }
+
+        let total_size = files.iter().map(|file| file.size).sum::<u64>();
+        println!(
+            "  {} file • {}\n",
+            files.len(),
+            crate::download::format_bytes(total_size)
+        );
+
+        let mut entries = files
+            .iter()
+            .map(|file| input::MenuEntry::new(downloaded_file_label(file)))
+            .collect::<Vec<_>>();
+        entries.push(input::MenuEntry::new("📂 Buka Folder Download"));
+        entries.push(input::MenuEntry::new("Kembali"));
+
+        let Some(choice) = input::select_menu_simple("Pilih file yang diunduh:", &entries, 0)?
+        else {
+            break;
+        };
+        if choice < files.len() {
+            handle_downloaded_file_action(&files[choice])?;
+            continue;
+        }
+        if choice == files.len() {
+            open_download_folder(&directory);
+            pause_for_enter();
+            continue;
+        }
+        break;
+    }
+    Ok(())
+}
+
+fn handle_downloaded_file_action(file: &crate::download::DownloadedFile) -> anyhow::Result<()> {
+    loop {
+        clearscreen_and_show_banner()?;
+        let name = file
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("(tanpa nama)");
+        println!("File Terunduh:");
+        println!("  Nama   : {}", name);
+        println!(
+            "  Folder : {}",
+            file.path
+                .parent()
+                .map(|parent| parent.display().to_string())
+                .unwrap_or_else(|| "-".to_string())
+        );
+        println!("  Ukuran : {}", crate::download::format_bytes(file.size));
+        if file.modified > 0 {
+            println!(
+                "  Diubah : {}",
+                crate::models::format_relative_time(file.modified)
+            );
+        }
+        println!();
+
+        let actions = [
+            "▶ Putar",
+            "📂 Buka Folder",
+            "🗑 Hapus File",
+            "Kembali",
+        ];
+        let entries = actions
+            .iter()
+            .map(|label| input::MenuEntry::new(*label))
+            .collect::<Vec<_>>();
+        let Some(choice) = input::select_menu_simple("Pilih Tindakan:", &entries, 0)? else {
+            return Ok(());
+        };
+
+        match choice {
+            0 => {
+                play_downloaded_file(&file.path)?;
+                pause_for_enter();
+            }
+            1 => {
+                let directory = file
+                    .path
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_else(crate::download::default_download_dir);
+                open_download_folder(&directory);
+                pause_for_enter();
+            }
+            2 => {
+                if confirm_action(&format!("Hapus file '{}'?", name))? {
+                    if let Err(error) = std::fs::remove_file(&file.path) {
+                        eprintln!(
+                            "{} Gagal menghapus '{}': {}",
+                            "■".red(),
+                            file.path.display(),
+                            error
+                        );
+                        pause_for_enter();
+                    } else {
+                        let sidecar = file.path.with_extension("vtt");
+                        if sidecar.is_file() {
+                            let _ = std::fs::remove_file(sidecar);
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+            _ => return Ok(()),
+        }
+    }
+}
+
+fn play_downloaded_file(path: &std::path::Path) -> anyhow::Result<()> {
+    use config::PlayerChoice;
+
+    let config = config::Config::load();
+    let mut selected = config.effective_player();
+    if config.player == PlayerChoice::Ask {
+        let labels = ["MPV", "VLC", "Aplikasi default", "Kembali"];
+        let entries = labels
+            .iter()
+            .map(|label| input::MenuEntry::new(*label))
+            .collect::<Vec<_>>();
+        let Some(choice) = input::select_menu_simple("Putar dengan:", &entries, 0)? else {
+            return Ok(());
+        };
+        selected = match choice {
+            0 => PlayerChoice::Mpv,
+            1 => PlayerChoice::Vlc,
+            2 => PlayerChoice::Browser,
+            _ => return Ok(()),
+        };
+    }
+
+    match selected {
+        PlayerChoice::Mpv => {
+            if !check_command_exists("mpv") {
+                eprintln!("{} MPV tidak ditemukan.", "■".red());
+                return Ok(());
+            }
+            let status = Command::new(resolve_command_path("mpv"))
+                .arg(path)
+                .status();
+            match status {
+                Ok(status) if status.success() => {}
+                Ok(_) => eprintln!("{} MPV keluar dengan status tidak normal.", "■".red()),
+                Err(error) => eprintln!("{} Gagal menjalankan MPV: {}", "■".red(), error),
+            }
+        }
+        PlayerChoice::Vlc => {
+            if !check_command_exists("vlc") {
+                eprintln!("{} VLC tidak ditemukan.", "■".red());
+                return Ok(());
+            }
+            let status = Command::new(resolve_command_path("vlc"))
+                .arg(path)
+                .status();
+            match status {
+                Ok(status) if status.success() => {}
+                Ok(_) => eprintln!("{} VLC keluar dengan status tidak normal.", "■".red()),
+                Err(error) => eprintln!("{} Gagal menjalankan VLC: {}", "■".red(), error),
+            }
+        }
+        _ => match open::that(path) {
+            Ok(()) => println!(
+                "{} Membuka '{}' dengan aplikasi default.",
+                "✓".green(),
+                path.display()
+            ),
+            Err(error) => eprintln!("{} Gagal membuka file: {}", "■".red(), error),
+        },
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BatchManagerAction {
     Run,
@@ -1782,6 +2019,7 @@ enum MainAction {
     Explore,
     Watchlist,
     History,
+    Downloaded,
     Settings,
     Health,
     Update,
@@ -1832,11 +2070,18 @@ fn show_main_menu() -> anyhow::Result<Option<MainAction>> {
     } else {
         "Watchlist".to_string()
     };
+    let downloaded_count = crate::download::downloaded_files().len();
+    let downloaded_label = if downloaded_count > 0 {
+        format!("Terunduh ({})", downloaded_count)
+    } else {
+        "Terunduh".to_string()
+    };
     for (label, action) in [
         ("Cari anime / film".to_string(), MainAction::Search),
         ("Jelajahi anime (AniList)".to_string(), MainAction::Explore),
         (watchlist_label, MainAction::Watchlist),
         ("Riwayat".to_string(), MainAction::History),
+        (downloaded_label, MainAction::Downloaded),
         ("Pengaturan".to_string(), MainAction::Settings),
         ("Cek kesehatan".to_string(), MainAction::Health),
         ("Perbarui Animeku-CLI".to_string(), MainAction::Update),
@@ -3102,6 +3347,9 @@ async fn run_app() -> anyhow::Result<()> {
             }
             MainAction::History => {
                 handle_resume_last_watch(&mut discord).await?;
+            }
+            MainAction::Downloaded => {
+                handle_downloaded_menu()?;
             }
             MainAction::Settings => {
                 handle_settings_menu(&mut discord).await?;

@@ -21,6 +21,7 @@ use crate::util;
 const PROGRESS_BAR_WIDTH: usize = 24;
 const MAX_FILENAME_CHARS: usize = 160;
 const MAX_FILENAME_BYTES: usize = 200;
+const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "m4v", "webm", "ts", "mov", "avi"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DownloadOutcome {
@@ -33,6 +34,21 @@ pub enum DownloadResult {
     Completed,
     Cancelled,
 }
+
+/// Snapshot emitted while ffmpeg is downloading. `total_size` is the output
+/// size reported by ffmpeg; the batch list computes transfer speed from the
+/// delta between snapshots.
+#[derive(Debug, Clone, Default)]
+pub struct DownloadProgress {
+    pub duration: Option<f64>,
+    pub out_seconds: f64,
+    pub total_size: u64,
+    pub speed: String,
+    pub finished: bool,
+    pub paused: bool,
+}
+
+pub type DownloadProgressCallback = Arc<dyn Fn(DownloadProgress) + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -84,6 +100,65 @@ pub fn default_download_dir() -> PathBuf {
         .or_else(|| dirs::home_dir().map(|home| home.join("Downloads")))
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     base.join("Animeku-CLI")
+}
+
+#[derive(Debug, Clone)]
+pub struct DownloadedFile {
+    pub path: PathBuf,
+    pub size: u64,
+    /// Unix timestamp from the filesystem, or 0 when unavailable.
+    pub modified: u64,
+}
+
+/// Video files already present in the configured download folder. This is a
+/// filesystem view, not a queue: users can inspect and play files even after
+/// the batch queue has been cleared.
+pub fn downloaded_files() -> Vec<DownloadedFile> {
+    downloaded_files_in(&default_download_dir())
+}
+
+pub fn downloaded_files_in(directory: &Path) -> Vec<DownloadedFile> {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut files = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+        if file_name.contains(".part.") {
+            continue;
+        }
+        let extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !VIDEO_EXTENSIONS.contains(&extension.as_str()) {
+            continue;
+        }
+        let metadata = entry.metadata().ok();
+        let size = metadata.as_ref().map(|metadata| metadata.len()).unwrap_or(0);
+        let modified = metadata
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        files.push(DownloadedFile {
+            path,
+            size,
+            modified,
+        });
+    }
+    files.sort_by(|left, right| {
+        right
+            .modified
+            .cmp(&left.modified)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    files
 }
 
 /// Prompt for destination and filename, then download the selected stream.
@@ -184,7 +259,7 @@ pub fn download_to_path(
     stream: &Stream,
     output_path: &Path,
 ) -> Result<DownloadResult> {
-    download_to_path_inner(provider_type, stream, output_path, None)
+    download_to_path_inner(provider_type, stream, output_path, None, None)
 }
 
 /// Batch downloads share a pause flag. Pressing `p` during ffmpeg pauses the
@@ -196,7 +271,26 @@ pub fn download_to_path_with_pause(
     output_path: &Path,
     pause: Arc<AtomicBool>,
 ) -> Result<DownloadResult> {
-    download_to_path_inner(provider_type, stream, output_path, Some(pause))
+    download_to_path_inner(provider_type, stream, output_path, Some(pause), None)
+}
+
+/// Variant used by the batch list UI. The callback receives live ffmpeg
+/// progress, and this function stops writing its own progress line so the
+/// caller can render a multi-line status list safely.
+pub fn download_to_path_with_progress(
+    provider_type: usize,
+    stream: &Stream,
+    output_path: &Path,
+    pause: Arc<AtomicBool>,
+    progress: DownloadProgressCallback,
+) -> Result<DownloadResult> {
+    download_to_path_inner(
+        provider_type,
+        stream,
+        output_path,
+        Some(pause),
+        Some(progress),
+    )
 }
 
 fn download_to_path_inner(
@@ -204,6 +298,7 @@ fn download_to_path_inner(
     stream: &Stream,
     output_path: &Path,
     pause: Option<Arc<AtomicBool>>,
+    progress: Option<DownloadProgressCallback>,
 ) -> Result<DownloadResult> {
     ensure_available()?;
     if output_path.is_dir() {
@@ -234,6 +329,7 @@ fn download_to_path_inner(
         Config::load().embed_subtitles,
         output_path,
         pause,
+        progress,
     )
 }
 
@@ -411,8 +507,6 @@ fn sanitize_filename(raw: &str) -> String {
 }
 
 fn ensure_extension(name: &str, default_extension: &str) -> String {
-    const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "m4v", "webm", "ts", "mov", "avi"];
-
     let trimmed = name.trim().trim_end_matches('.');
     if trimmed.is_empty() {
         return format!("animeku-download.{}", default_extension);
@@ -723,6 +817,7 @@ impl Drop for DownloadControl {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_ffmpeg(
     provider_type: usize,
     url: &str,
@@ -731,29 +826,41 @@ fn run_ffmpeg(
     embed_subtitles: bool,
     output: &Path,
     pause: Option<Arc<AtomicBool>>,
+    progress_callback: Option<DownloadProgressCallback>,
 ) -> Result<DownloadResult> {
     let allow_pause = pause.is_some();
+    let list_mode = progress_callback.is_some();
     let duration = probe_duration(provider_type, url);
     let partial = partial_path(output);
     if partial.exists() {
         let _ = fs::remove_file(&partial);
     }
 
-    println!("{} Mengunduh dengan ffmpeg...", "◆".blue());
-    if allow_pause {
-        if cfg!(unix) {
-            println!(
-                "  {} Tekan Esc/q/Ctrl+C untuk membatalkan • p untuk jeda/lanjut.",
-                "•".dimmed()
-            );
+    if !list_mode {
+        println!("{} Mengunduh dengan ffmpeg...", "◆".blue());
+        if allow_pause {
+            if cfg!(unix) {
+                println!(
+                    "  {} Tekan Esc/q/Ctrl+C untuk membatalkan • p untuk jeda/lanjut.",
+                    "•".dimmed()
+                );
+            } else {
+                println!(
+                    "  {} Tekan Esc/q/Ctrl+C untuk membatalkan • p untuk jeda setelah episode ini.",
+                    "•".dimmed()
+                );
+            }
         } else {
-            println!(
-                "  {} Tekan Esc/q/Ctrl+C untuk membatalkan • p untuk jeda setelah episode ini.",
-                "•".dimmed()
-            );
+            println!("  {} Tekan Esc/q/Ctrl+C untuk membatalkan.", "•".dimmed());
         }
-    } else {
-        println!("  {} Tekan Esc/q/Ctrl+C untuk membatalkan.", "•".dimmed());
+    }
+    if let Some(callback) = &progress_callback {
+        callback(DownloadProgress {
+            duration,
+            finished: false,
+            paused: false,
+            ..Default::default()
+        });
     }
     let mut command =
         build_ffmpeg_command(provider_type, url, audio, subtitle, embed_subtitles, &partial);
@@ -851,16 +958,18 @@ fn run_ffmpeg(
                 paused = want_pause;
                 if cfg!(unix) {
                     set_process_paused(child.id(), paused);
-                    clear_progress_line();
-                    if paused {
-                        println!(
-                            "  {} Download dijeda. Tekan p lagi untuk melanjutkan.",
-                            "ℹ".blue()
-                        );
-                    } else {
-                        println!("  {} Download dilanjutkan.", "▶".green());
+                    if !list_mode {
+                        clear_progress_line();
+                        if paused {
+                            println!(
+                                "  {} Download dijeda. Tekan p lagi untuk melanjutkan.",
+                                "ℹ".blue()
+                            );
+                        } else {
+                            println!("  {} Download dilanjutkan.", "▶".green());
+                        }
                     }
-                } else if paused {
+                } else if paused && !list_mode {
                     clear_progress_line();
                     println!(
                         "  {} Jeda diminta. Batch akan berhenti setelah episode ini.",
@@ -871,7 +980,18 @@ fn run_ffmpeg(
         }
 
         if last_draw.elapsed() >= Duration::from_millis(250) {
-            render_progress(duration, out_seconds, total_size, &speed, finished);
+            if let Some(callback) = &progress_callback {
+                callback(DownloadProgress {
+                    duration,
+                    out_seconds,
+                    total_size,
+                    speed: speed.clone(),
+                    finished,
+                    paused,
+                });
+            } else {
+                render_progress(duration, out_seconds, total_size, &speed, finished);
+            }
             last_draw = Instant::now();
         }
     }
@@ -890,24 +1010,36 @@ fn run_ffmpeg(
     drop(control);
     let error_lines = stderr_handle.join().unwrap_or_default();
     let _ = stdout_handle.join();
-    clear_progress_line();
+    if !list_mode {
+        clear_progress_line();
+    }
     let status = status_result?;
 
     if cancelled {
         let _ = fs::remove_file(&partial);
-        println!("{} Download dibatalkan.", "■".yellow());
+        if !list_mode {
+            println!("{} Download dibatalkan.", "■".yellow());
+        }
         return Ok(DownloadResult::Cancelled);
     }
 
     if !status.success() {
         let _ = fs::remove_file(&partial);
-        if !error_lines.is_empty() {
+        if !list_mode && !error_lines.is_empty() {
             eprintln!("{}", "Log ffmpeg terakhir:".yellow());
             for line in &error_lines {
                 eprintln!("  {}", line);
             }
         }
-        anyhow::bail!("ffmpeg keluar dengan status {}", status);
+        let detail = if list_mode {
+            error_lines
+                .last()
+                .map(|line| format!(": {line}"))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        anyhow::bail!("ffmpeg keluar dengan status {}{}", status, detail);
     }
 
     if !partial.is_file() {
@@ -935,18 +1067,33 @@ fn run_ffmpeg(
     fs::rename(&partial, output)
         .with_context(|| format!("gagal memindahkan hasil download ke '{}'", output.display()))?;
 
-    println!(
-        "{} Download selesai: {} ({})",
-        "✓".green(),
-        output.display(),
-        format_bytes(size)
-    );
+    if let Some(callback) = &progress_callback {
+        callback(DownloadProgress {
+            duration,
+            out_seconds: duration.unwrap_or(out_seconds),
+            total_size: size,
+            speed,
+            finished: true,
+            paused: false,
+        });
+    }
+
+    if !list_mode {
+        println!(
+            "{} Download selesai: {} ({})",
+            "✓".green(),
+            output.display(),
+            format_bytes(size)
+        );
+    }
 
     if let Some(subtitle) = subtitle {
         if embed_subtitles {
-            println!("  {} Subtitle ditanam ke dalam video.", "•".dimmed());
+            if !list_mode {
+                println!("  {} Subtitle ditanam ke dalam video.", "•".dimmed());
+            }
         } else {
-            copy_subtitle(Path::new(subtitle), output);
+            copy_subtitle(Path::new(subtitle), output, list_mode);
         }
     }
 
@@ -1015,7 +1162,7 @@ fn clear_progress_line() {
     let _ = std::io::stdout().flush();
 }
 
-fn format_bytes(bytes: u64) -> String {
+pub(crate) fn format_bytes(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
     const MIB: f64 = KIB * 1024.0;
     const GIB: f64 = MIB * 1024.0;
@@ -1031,19 +1178,21 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn copy_subtitle(subtitle: &Path, output: &Path) {
+fn copy_subtitle(subtitle: &Path, output: &Path, quiet: bool) {
     let sidecar = output.with_extension("vtt");
     if subtitle == sidecar {
         return;
     }
     match fs::copy(subtitle, &sidecar) {
-        Ok(_) => println!("  Subtitle: {}", sidecar.display()),
-        Err(error) => eprintln!(
+        Ok(_) if !quiet => println!("  Subtitle: {}", sidecar.display()),
+        Ok(_) => {}
+        Err(error) if !quiet => eprintln!(
             "{} Gagal menyalin subtitle ke '{}': {}",
             "⚠".yellow(),
             sidecar.display(),
             error
         ),
+        Err(_) => {}
     }
 }
 
@@ -1340,5 +1489,32 @@ mod live_smoke_tests {
             }
             panic!("all Otakudesu streams failed");
         });
+    }
+
+    #[test]
+    fn downloaded_files_lists_only_final_videos() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "animeku-downloaded-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("episode-1.mkv"), b"video").unwrap();
+        fs::write(dir.join("episode-2.mp4"), b"video").unwrap();
+        fs::write(dir.join("episode-3.part.mp4"), b"partial").unwrap();
+        fs::write(dir.join("catatan.txt"), b"not a video").unwrap();
+
+        let files = downloaded_files_in(&dir);
+        let mut names = files
+            .iter()
+            .map(|file| file.path.file_name().unwrap().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, vec!["episode-1.mkv", "episode-2.mp4"]);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

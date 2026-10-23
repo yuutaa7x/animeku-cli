@@ -1,15 +1,22 @@
 use std::collections::{HashMap, HashSet};
+use std::io::{stdout, IsTerminal, Write};
 use std::path::Path;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::time::{Duration, Instant};
 
 use colored::Colorize;
+use crossterm::{
+    cursor::MoveToPreviousLine,
+    execute,
+    terminal::{Clear, ClearType},
+};
 
 use crate::{
     batch::{BatchItemStatus, BatchQueue},
+    download::{DownloadProgress, DownloadProgressCallback},
     ext::{self, Ext},
     input,
     models::{Episode, Meta, Movie, Stream},
@@ -579,6 +586,290 @@ fn print_batch_status(
         "•".dimmed(),
         format_batch_status(done, total, completed, skipped, failed, started.elapsed())
     );
+}
+
+const BATCH_PROGRESS_BAR_WIDTH: usize = 10;
+const BATCH_MAX_VISIBLE_ROWS: usize = 12;
+
+fn batch_episode_label(index: usize, episode: &Episode) -> String {
+    if let Some((season, number)) = crate::episode::parse_season_episode(&episode.title) {
+        return if season > 1 {
+            format!("S{}E{:02}", season, number)
+        } else {
+            format!("E{:02}", number)
+        };
+    }
+    if let Some(number) = crate::episode::episode_number(&episode.title) {
+        return format!("E{:02}", number);
+    }
+    format!("E{:02}", index + 1)
+}
+
+fn batch_progress_bar(ratio: f64) -> String {
+    let ratio = ratio.clamp(0.0, 1.0);
+    let filled = (ratio * BATCH_PROGRESS_BAR_WIDTH as f64).round() as usize;
+    format!(
+        "{}{}",
+        "█".repeat(filled.min(BATCH_PROGRESS_BAR_WIDTH)),
+        "░".repeat(BATCH_PROGRESS_BAR_WIDTH.saturating_sub(filled))
+    )
+}
+
+/// Live list used while a sequential batch runs. Only one episode is active at
+/// a time; the rest stay visible as `pending`, `selesai`, `dilewati`, or
+/// `gagal`, which makes the queue much easier to scan than a single status
+/// line printed after every episode.
+struct BatchListUi {
+    labels: Vec<String>,
+    statuses: Vec<BatchItemStatus>,
+    active: Option<usize>,
+    progress: DownloadProgress,
+    drawn_lines: usize,
+    enabled: bool,
+    cancelled: bool,
+    last_size: u64,
+    last_rate_at: Instant,
+    bytes_per_sec: f64,
+}
+
+impl BatchListUi {
+    fn new(
+        episodes: &[Episode],
+        statuses: &[BatchItemStatus],
+        active: Option<usize>,
+        enabled: bool,
+    ) -> Self {
+        Self {
+            labels: episodes
+                .iter()
+                .enumerate()
+                .map(|(index, episode)| batch_episode_label(index, episode))
+                .collect(),
+            statuses: statuses.to_vec(),
+            active,
+            progress: DownloadProgress::default(),
+            drawn_lines: 0,
+            enabled,
+            cancelled: false,
+            last_size: 0,
+            last_rate_at: Instant::now(),
+            bytes_per_sec: 0.0,
+        }
+    }
+
+    fn set_active(&mut self, index: usize) {
+        self.active = Some(index);
+        self.progress = DownloadProgress::default();
+        self.cancelled = false;
+        self.last_size = 0;
+        self.last_rate_at = Instant::now();
+        self.bytes_per_sec = 0.0;
+        self.draw();
+    }
+
+    fn set_progress(&mut self, progress: DownloadProgress) {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_rate_at).as_secs_f64();
+        if elapsed >= 0.20 {
+            if progress.total_size >= self.last_size {
+                let instant = (progress.total_size - self.last_size) as f64 / elapsed;
+                if instant > 0.0 {
+                    self.bytes_per_sec = if self.bytes_per_sec <= 0.0 {
+                        instant
+                    } else {
+                        self.bytes_per_sec * 0.65 + instant * 0.35
+                    };
+                }
+            } else {
+                self.bytes_per_sec = 0.0;
+            }
+            self.last_size = progress.total_size;
+            self.last_rate_at = now;
+        }
+        self.progress = progress;
+        self.draw();
+    }
+
+    fn set_status(&mut self, index: usize, status: BatchItemStatus) {
+        if let Some(slot) = self.statuses.get_mut(index) {
+            *slot = status;
+        }
+        if self.active == Some(index) {
+            self.active = None;
+        }
+        self.draw();
+    }
+
+    fn mark_cancelled(&mut self) {
+        self.cancelled = true;
+        self.draw();
+    }
+
+    fn log_line(&mut self, message: &str) {
+        if !self.enabled {
+            println!("{message}");
+            return;
+        }
+        self.clear_block();
+        println!("{message}");
+        self.drawn_lines = 0;
+        self.draw();
+    }
+
+    fn finish(&mut self) {
+        self.draw();
+        self.drawn_lines = 0;
+    }
+
+    fn clear_block(&mut self) {
+        if !self.enabled || self.drawn_lines == 0 {
+            return;
+        }
+        let mut out = stdout();
+        execute!(out, MoveToPreviousLine(self.drawn_lines as u16)).ok();
+        for index in 0..self.drawn_lines {
+            execute!(out, Clear(ClearType::CurrentLine)).ok();
+            if index + 1 < self.drawn_lines {
+                let _ = writeln!(out);
+            }
+        }
+        if self.drawn_lines > 1 {
+            execute!(out, MoveToPreviousLine((self.drawn_lines - 1) as u16)).ok();
+        }
+        let _ = out.flush();
+        self.drawn_lines = 0;
+    }
+
+    fn draw(&mut self) {
+        if !self.enabled || self.labels.is_empty() {
+            return;
+        }
+        let (start, end) = self.visible_range();
+        let width = crossterm::terminal::size()
+            .map(|(columns, _)| columns as usize)
+            .unwrap_or(80)
+            .saturating_sub(1)
+            .max(20);
+        let lines = (start..end)
+            .map(|index| {
+                let line = self.row(index);
+                dialoguer::console::truncate_str(&line, width, "…").into_owned()
+            })
+            .collect::<Vec<_>>();
+
+        let mut out = stdout();
+        let old_lines = self.drawn_lines;
+        if old_lines > 0 {
+            execute!(out, MoveToPreviousLine(old_lines as u16)).ok();
+        }
+        for line in &lines {
+            execute!(out, Clear(ClearType::CurrentLine)).ok();
+            let _ = writeln!(out, "{line}");
+        }
+        if lines.len() < old_lines {
+            for index in lines.len()..old_lines {
+                execute!(out, Clear(ClearType::CurrentLine)).ok();
+                if index + 1 < old_lines {
+                    let _ = writeln!(out);
+                }
+            }
+            let move_up = old_lines.saturating_sub(lines.len() + 1);
+            if move_up > 0 {
+                execute!(out, MoveToPreviousLine(move_up as u16)).ok();
+            }
+        }
+        let _ = out.flush();
+        self.drawn_lines = lines.len();
+    }
+
+    fn visible_range(&self) -> (usize, usize) {
+        let total = self.labels.len();
+        if total <= BATCH_MAX_VISIBLE_ROWS {
+            return (0, total);
+        }
+        let active = self.active.unwrap_or(0);
+        let half = BATCH_MAX_VISIBLE_ROWS / 2;
+        let start = active
+            .saturating_sub(half)
+            .min(total - BATCH_MAX_VISIBLE_ROWS);
+        (start, start + BATCH_MAX_VISIBLE_ROWS)
+    }
+
+    fn row(&self, index: usize) -> String {
+        let prefix = format!(
+            "[{}/{}] {}",
+            index + 1,
+            self.labels.len(),
+            self.labels[index]
+        );
+        if self.active == Some(index) {
+            if self.cancelled {
+                return format!("{prefix}  ■ dibatalkan");
+            }
+            let progress = &self.progress;
+            let speed = self.format_rate();
+            if progress.paused {
+                return format!("{prefix}  ‖ dijeda");
+            }
+            if let Some(duration) = progress.duration.filter(|duration| *duration > 0.0) {
+                let ratio = if progress.finished {
+                    1.0
+                } else {
+                    (progress.out_seconds / duration).clamp(0.0, 1.0)
+                };
+                return format!(
+                    "{prefix}  {} {:3.0}%  {}",
+                    batch_progress_bar(ratio),
+                    ratio * 100.0,
+                    speed
+                );
+            }
+            return format!(
+                "{prefix}  ⬇ {:>6}  {:>8}  {}",
+                crate::models::format_seconds(progress.out_seconds as u64),
+                crate::download::format_bytes(progress.total_size),
+                speed
+            );
+        }
+
+        match self.statuses.get(index).copied().unwrap_or_default() {
+            BatchItemStatus::Pending => format!("{prefix}  pending      -        -"),
+            BatchItemStatus::Completed => format!("{prefix}  ✓ selesai"),
+            BatchItemStatus::Skipped => format!("{prefix}  ↷ dilewati"),
+            BatchItemStatus::Failed => format!("{prefix}  ■ gagal"),
+        }
+    }
+
+    fn format_rate(&self) -> String {
+        if self.bytes_per_sec >= 1.0 {
+            format!(
+                "{}/s",
+                crate::download::format_bytes(self.bytes_per_sec as u64)
+            )
+        } else if !self.progress.speed.is_empty() {
+            self.progress.speed.clone()
+        } else {
+            "—".to_string()
+        }
+    }
+}
+
+#[derive(Clone)]
+struct BatchDownloadControls {
+    pause: Arc<AtomicBool>,
+    ui: Option<Arc<Mutex<BatchListUi>>>,
+}
+
+fn batch_log(ui: &Option<Arc<Mutex<BatchListUi>>>, message: impl Into<String>) {
+    let message = message.into();
+    match ui {
+        Some(ui) => {
+            if let Ok(mut ui) = ui.lock() {
+                ui.log_line(&message);
+            }
+        }
+        None => println!("{message}"),
+    }
 }
 
 impl AnimekuCli {
@@ -1410,30 +1701,42 @@ impl AnimekuCli {
         target_title: &str,
         directory: &Path,
         existing: crate::download::ExistingFilePolicy,
-        pause: Arc<AtomicBool>,
+        controls: BatchDownloadControls,
     ) -> BatchItemOutcome {
         let streams = match retry_streams(self.extractor.as_ref(), episode).await {
             Ok(streams) if !streams.is_empty() => streams,
             Ok(_) => {
-                eprintln!("{} Server stream kosong.", "■".red());
+                batch_log(
+                    &controls.ui,
+                    format!("{} Server stream kosong.", "■".red()),
+                );
                 return BatchItemOutcome::Failed("server stream kosong".into());
             }
             Err(error) => {
-                eprintln!("{} Gagal memuat stream: {:#}", "■".red(), error);
+                batch_log(
+                    &controls.ui,
+                    format!("{} Gagal memuat stream: {:#}", "■".red(), error),
+                );
                 return BatchItemOutcome::Failed(format!("gagal memuat stream: {error:#}"));
             }
         };
 
         let Some(stream) = choose_batch_stream(&streams, target_title) else {
-            eprintln!("{} Server stream kosong.", "■".red());
+            batch_log(
+                &controls.ui,
+                format!("{} Server stream kosong.", "■".red()),
+            );
             return BatchItemOutcome::Failed("server stream kosong".into());
         };
         if batch_quality_key(&stream.title) != batch_quality_key(target_title) {
-            println!(
-                "{} Kualitas '{}' tidak tersedia, memakai '{}'.",
-                "ℹ".blue(),
-                target_title,
-                stream.title
+            batch_log(
+                &controls.ui,
+                format!(
+                    "{} Kualitas '{}' tidak tersedia, memakai '{}'.",
+                    "ℹ".blue(),
+                    target_title,
+                    stream.title
+                ),
             );
         }
 
@@ -1445,10 +1748,13 @@ impl AnimekuCli {
             directory,
         );
         if output.is_dir() {
-            eprintln!(
-                "{} '{}' adalah folder, bukan nama file yang valid.",
-                "■".red(),
-                output.display()
+            batch_log(
+                &controls.ui,
+                format!(
+                    "{} '{}' adalah folder, bukan nama file yang valid.",
+                    "■".red(),
+                    output.display()
+                ),
             );
             return BatchItemOutcome::Failed(format!(
                 "'{}' adalah folder, bukan nama file yang valid",
@@ -1458,20 +1764,42 @@ impl AnimekuCli {
         if output.exists() {
             match existing {
                 crate::download::ExistingFilePolicy::Skip => {
-                    println!("{} Dilewati: file sudah ada.", "↷".yellow());
+                    batch_log(
+                        &controls.ui,
+                        format!("{} Dilewati: file sudah ada.", "↷".yellow()),
+                    );
                     return BatchItemOutcome::Skipped;
                 }
                 crate::download::ExistingFilePolicy::Overwrite => {}
             }
         }
 
+        let progress_callback = controls.ui.as_ref().map(|ui| {
+            let ui = Arc::clone(ui);
+            Arc::new(move |progress: DownloadProgress| {
+                if let Ok(mut ui) = ui.lock() {
+                    ui.set_progress(progress);
+                }
+            }) as DownloadProgressCallback
+        });
+
         for attempt in 1..=BATCH_DOWNLOAD_ATTEMPTS {
-            match crate::download::download_to_path_with_pause(
-                self.provider_type,
-                stream,
-                &output,
-                Arc::clone(&pause),
-            ) {
+            let result = match &progress_callback {
+                Some(callback) => crate::download::download_to_path_with_progress(
+                    self.provider_type,
+                    stream,
+                    &output,
+                    Arc::clone(&controls.pause),
+                    Arc::clone(callback),
+                ),
+                None => crate::download::download_to_path_with_pause(
+                    self.provider_type,
+                    stream,
+                    &output,
+                    Arc::clone(&controls.pause),
+                ),
+            };
+            match result {
                 Ok(crate::download::DownloadResult::Completed) => {
                     return BatchItemOutcome::Completed;
                 }
@@ -1479,22 +1807,28 @@ impl AnimekuCli {
                     return BatchItemOutcome::Cancelled;
                 }
                 Err(error) if attempt < BATCH_DOWNLOAD_ATTEMPTS => {
-                    eprintln!(
-                        "{} Download gagal (percobaan {}/{}): {:#}. Mencoba ulang...",
-                        "■".red(),
-                        attempt,
-                        BATCH_DOWNLOAD_ATTEMPTS,
-                        error
+                    batch_log(
+                        &controls.ui,
+                        format!(
+                            "{} Download gagal (percobaan {}/{}): {:#}. Mencoba ulang...",
+                            "■".red(),
+                            attempt,
+                            BATCH_DOWNLOAD_ATTEMPTS,
+                            error
+                        ),
                     );
                     let backoff = Duration::from_secs(1u64 << (attempt - 1));
                     tokio::time::sleep(backoff).await;
                 }
                 Err(error) => {
-                    eprintln!(
-                        "{} Download gagal setelah {} percobaan: {:#}",
-                        "■".red(),
-                        BATCH_DOWNLOAD_ATTEMPTS,
-                        error
+                    batch_log(
+                        &controls.ui,
+                        format!(
+                            "{} Download gagal setelah {} percobaan: {:#}",
+                            "■".red(),
+                            BATCH_DOWNLOAD_ATTEMPTS,
+                            error
+                        ),
                     );
                     return BatchItemOutcome::Failed(format!("{error:#}"));
                 }
@@ -1525,15 +1859,38 @@ impl AnimekuCli {
         // stops the queue after the current episode.
         let pause = Arc::new(AtomicBool::new(false));
 
+        let list_enabled = stdout().is_terminal() && crossterm::terminal::size().is_ok();
+        let ui = Arc::new(Mutex::new(BatchListUi::new(
+            &queue.episodes,
+            &queue.statuses,
+            None,
+            list_enabled,
+        )));
+        if list_enabled {
+            if let Ok(mut ui) = ui.lock() {
+                ui.draw();
+            }
+        }
+        let controls = BatchDownloadControls {
+            pause: Arc::clone(&pause),
+            ui: list_enabled.then(|| Arc::clone(&ui)),
+        };
+
         for index in pending {
             let episode = queue.episodes[index].clone();
-            println!(
-                "\n{} [{}/{}] {}",
-                "◆".blue(),
-                index + 1,
-                total,
-                episode.title.trim()
-            );
+            if list_enabled {
+                if let Ok(mut ui) = ui.lock() {
+                    ui.set_active(index);
+                }
+            } else {
+                println!(
+                    "\n{} [{}/{}] {}",
+                    "◆".blue(),
+                    index + 1,
+                    total,
+                    episode.title.trim()
+                );
+            }
 
             let outcome = self
                 .download_batch_episode(
@@ -1542,23 +1899,37 @@ impl AnimekuCli {
                     &queue.target_quality,
                     &directory,
                     queue.existing,
-                    Arc::clone(&pause),
+                    controls.clone(),
                 )
                 .await;
 
             match outcome {
                 BatchItemOutcome::Completed => {
                     queue.mark(index, BatchItemStatus::Completed);
+                    if let Ok(mut ui) = ui.lock() {
+                        ui.set_status(index, BatchItemStatus::Completed);
+                    }
                 }
                 BatchItemOutcome::Skipped => {
                     queue.mark(index, BatchItemStatus::Skipped);
+                    if let Ok(mut ui) = ui.lock() {
+                        ui.set_status(index, BatchItemStatus::Skipped);
+                    }
                 }
                 BatchItemOutcome::Failed(error) => {
-                    eprintln!("{} {}", "■".red(), error);
+                    if !list_enabled {
+                        eprintln!("{} {}", "■".red(), error);
+                    }
                     queue.log_error(&episode, &error);
                     queue.mark(index, BatchItemStatus::Failed);
+                    if let Ok(mut ui) = ui.lock() {
+                        ui.set_status(index, BatchItemStatus::Failed);
+                    }
                 }
                 BatchItemOutcome::Cancelled => {
+                    if let Ok(mut ui) = ui.lock() {
+                        ui.mark_cancelled();
+                    }
                     cancelled = true;
                     break;
                 }
@@ -1567,7 +1938,7 @@ impl AnimekuCli {
             processed += 1;
             let _ = queue.save();
             let (completed, skipped, failed, _) = queue.counts();
-            if !cancelled {
+            if !cancelled && !list_enabled {
                 print_batch_status(
                     already_done + processed,
                     total,
@@ -1581,6 +1952,12 @@ impl AnimekuCli {
             if pause.load(Ordering::SeqCst) {
                 paused = true;
                 break;
+            }
+        }
+
+        if list_enabled {
+            if let Ok(mut ui) = ui.lock() {
+                ui.finish();
             }
         }
 
@@ -2438,5 +2815,59 @@ mod tests {
         );
         assert_eq!(batch_eta(0, 12, Duration::ZERO), "—");
         assert_eq!(batch_eta(12, 12, Duration::from_secs(90)), "00:00");
+    }
+
+    #[test]
+    fn batch_list_labels_use_season_and_episode_numbers() {
+        let episodes = [
+            Episode {
+                id: "1".into(),
+                title: "S1E03 - Judul".into(),
+                is_series: true,
+            },
+            Episode {
+                id: "2".into(),
+                title: "Episode 7".into(),
+                is_series: true,
+            },
+            Episode {
+                id: "3".into(),
+                title: "S2E11 - Judul".into(),
+                is_series: true,
+            },
+        ];
+
+        assert_eq!(batch_episode_label(0, &episodes[0]), "E03");
+        assert_eq!(batch_episode_label(1, &episodes[1]), "E07");
+        assert_eq!(batch_episode_label(2, &episodes[2]), "S2E11");
+    }
+
+    #[test]
+    fn batch_list_shows_pending_and_live_progress_rows() {
+        let episodes = episode_list(2);
+        let statuses = vec![BatchItemStatus::Pending; 2];
+        let mut ui = BatchListUi::new(&episodes, &statuses, None, false);
+
+        assert_eq!(
+            ui.row(0),
+            "[1/2] E01  pending      -        -"
+        );
+
+        ui.set_active(0);
+        ui.set_progress(DownloadProgress {
+            duration: Some(100.0),
+            out_seconds: 68.0,
+            total_size: 12_000_000,
+            speed: "1.2x".into(),
+            finished: false,
+            paused: false,
+        });
+        let active = ui.row(0);
+        assert!(active.starts_with("[1/2] E01  "));
+        assert!(active.contains("68%"));
+        assert_eq!(
+            ui.row(1),
+            "[2/2] E02  pending      -        -"
+        );
     }
 }
