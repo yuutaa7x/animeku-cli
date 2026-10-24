@@ -286,6 +286,25 @@ fn local_episode_name(file: &crate::download::DownloadedFile) -> String {
     }
 }
 
+/// Same picker as `select_menu_simple`, but typing filters the list instead of
+/// jumping straight back. Used for lists that can grow long (titles, episodes).
+fn select_filtered(
+    prompt: &str,
+    entries: &[input::MenuEntry],
+    default: usize,
+) -> anyhow::Result<Option<usize>> {
+    let config = input::MenuConfig {
+        q_back: true,
+        allow_filter: true,
+        hint: Some("↑↓ pilih • Enter buka • ketik filter • Esc kembali"),
+        ..Default::default()
+    };
+    match input::select_menu_custom(prompt, entries, default, &config)? {
+        input::MenuResult::Selected(index) => Ok(Some(index)),
+        _ => Ok(None),
+    }
+}
+
 fn local_episode_label(file: &crate::download::DownloadedFile) -> String {
     let position = read_position(&file.path);
     let state = if position > 0 {
@@ -343,8 +362,7 @@ pub(crate) fn handle_downloaded_menu() -> anyhow::Result<()> {
         entries.push(input::MenuEntry::new("📂 Buka Folder Download"));
         entries.push(input::MenuEntry::new("Kembali"));
 
-        let Some(choice) = input::select_menu_simple("Pilih judul yang diunduh:", &entries, 0)?
-        else {
+        let Some(choice) = select_filtered("Pilih judul yang diunduh:", &entries, 0)? else {
             break;
         };
         if choice < groups.len() {
@@ -379,9 +397,10 @@ fn handle_local_group(group: &LocalGroup) -> anyhow::Result<()> {
             .map(|file| input::MenuEntry::new(local_episode_label(file)))
             .collect::<Vec<_>>();
         entries.push(input::MenuEntry::new("📂 Buka Folder"));
+        entries.push(input::MenuEntry::new("🗑 Hapus Semua Episode"));
         entries.push(input::MenuEntry::new("Kembali"));
 
-        let Some(choice) = input::select_menu_simple("Pilih episode:", &entries, 0)? else {
+        let Some(choice) = select_filtered("Pilih episode:", &entries, 0)? else {
             return Ok(());
         };
         if choice < group.episodes.len() {
@@ -401,8 +420,48 @@ fn handle_local_group(group: &LocalGroup) -> anyhow::Result<()> {
             pause_for_enter();
             continue;
         }
+        if choice == group.episodes.len() + 1 {
+            if confirm_action(&format!(
+                "Hapus {} episode '{}'?",
+                group.episodes.len(),
+                group.title
+            ))? {
+                if delete_local_files(&group.episodes) > 0 {
+                    pause_for_enter();
+                }
+                return Ok(());
+            }
+            continue;
+        }
         return Ok(());
     }
+}
+
+/// Removes each video with its `.pos` and `.vtt` sidecars. Returns how many
+/// videos could not be deleted, so the caller can keep the error on screen.
+fn delete_local_files(files: &[crate::download::DownloadedFile]) -> usize {
+    let mut failed = 0usize;
+    for file in files {
+        match std::fs::remove_file(&file.path) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(position_path(&file.path));
+                let subtitle = file.path.with_extension("vtt");
+                if subtitle.is_file() {
+                    let _ = std::fs::remove_file(&subtitle);
+                }
+            }
+            Err(error) => {
+                failed += 1;
+                eprintln!(
+                    "{} Gagal menghapus '{}': {}",
+                    "■".red(),
+                    file.path.display(),
+                    error
+                );
+            }
+        }
+    }
+    failed
 }
 
 /// Returns `true` when the file was deleted, so the caller reloads.
@@ -749,6 +808,40 @@ mod tests {
         std::fs::write(position_path(&video), "754").unwrap();
         assert_eq!(read_position(&video), 754);
         assert!(position_path(&video).ends_with("Judul - Episode 1.mp4.pos"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_local_files_removes_sidecars_too() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("animeku-del-{}-{stamp}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut files = Vec::new();
+        for number in 1..=2 {
+            let video = dir.join(format!("Judul - Episode {number}.mp4"));
+            std::fs::write(&video, b"video").unwrap();
+            std::fs::write(video.with_extension("vtt"), b"sub").unwrap();
+            let file = crate::download::DownloadedFile {
+                path: video,
+                size: 5,
+                modified: 0,
+                series: Some("Judul".to_string()),
+            };
+            std::fs::write(position_path(&file.path), "42").unwrap();
+            files.push(file);
+        }
+        let keep = dir.join("catatan.txt");
+        std::fs::write(&keep, b"keep").unwrap();
+
+        assert_eq!(delete_local_files(&files), 0);
+        assert!(files.iter().all(|file| !file.path.exists()));
+        assert!(files.iter().all(|file| !position_path(&file.path).exists()));
+        assert!(keep.exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

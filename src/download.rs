@@ -835,10 +835,41 @@ fn set_process_paused(pid: u32, paused: bool) {
     }
 }
 
-#[cfg(not(unix))]
-fn set_process_paused(_pid: u32, _paused: bool) {
-    // Windows/macOS fall back to "pause after the current episode". The caller
-    // still records the request and stops before the next queue item.
+#[cfg(windows)]
+fn set_process_paused(pid: u32, paused: bool) {
+    use std::ffi::c_void;
+    const PROCESS_SUSPEND_RESUME: u32 = 0x0800;
+    // SIGSTOP has no documented Win32 twin. NtSuspendProcess/NtResumeProcess
+    // are the calls every task manager wrapper uses; they freeze all threads
+    // at once, which is what the raw-mode `p` key needs.
+    // SAFETY: the handle comes straight from OpenProcess and is closed after
+    // the single ntdll call; a null handle is checked first.
+    unsafe {
+        let handle = OpenProcess(PROCESS_SUSPEND_RESUME, 0, pid);
+        if handle.is_null() {
+            return;
+        }
+        if paused {
+            NtSuspendProcess(handle);
+        } else {
+            NtResumeProcess(handle);
+        }
+        CloseHandle(handle);
+    }
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
+    fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+}
+
+#[cfg(windows)]
+#[link(name = "ntdll")]
+extern "system" {
+    fn NtSuspendProcess(process: *mut std::ffi::c_void) -> i32;
+    fn NtResumeProcess(process: *mut std::ffi::c_void) -> i32;
 }
 
 impl Drop for DownloadControl {
@@ -873,17 +904,10 @@ fn run_ffmpeg(
     if !list_mode {
         println!("{} Mengunduh dengan ffmpeg...", "◆".blue());
         if allow_pause {
-            if cfg!(unix) {
-                println!(
-                    "  {} Tekan Esc/q/Ctrl+C untuk membatalkan • p untuk jeda/lanjut.",
-                    "•".dimmed()
-                );
-            } else {
-                println!(
-                    "  {} Tekan Esc/q/Ctrl+C untuk membatalkan • p untuk jeda setelah episode ini.",
-                    "•".dimmed()
-                );
-            }
+            println!(
+                "  {} Tekan Esc/q/Ctrl+C untuk membatalkan • p untuk jeda/lanjut.",
+                "•".dimmed()
+            );
         } else {
             println!("  {} Tekan Esc/q/Ctrl+C untuk membatalkan.", "•".dimmed());
         }
@@ -990,25 +1014,17 @@ fn run_ffmpeg(
             let want_pause = control.paused();
             if want_pause != paused {
                 paused = want_pause;
-                if cfg!(unix) {
-                    set_process_paused(child.id(), paused);
-                    if !list_mode {
-                        clear_progress_line();
-                        if paused {
-                            println!(
-                                "  {} Download dijeda. Tekan p lagi untuk melanjutkan.",
-                                "ℹ".blue()
-                            );
-                        } else {
-                            println!("  {} Download dilanjutkan.", "▶".green());
-                        }
-                    }
-                } else if paused && !list_mode {
+                set_process_paused(child.id(), paused);
+                if !list_mode {
                     clear_progress_line();
-                    println!(
-                        "  {} Jeda diminta. Batch akan berhenti setelah episode ini.",
-                        "ℹ".blue()
-                    );
+                    if paused {
+                        println!(
+                            "  {} Download dijeda. Tekan p lagi untuk melanjutkan.",
+                            "ℹ".blue()
+                        );
+                    } else {
+                        println!("  {} Download dilanjutkan.", "▶".green());
+                    }
                 }
             }
         }
