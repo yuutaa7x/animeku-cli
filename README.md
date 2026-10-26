@@ -160,6 +160,14 @@ Untuk Windows, hapus `animeku-cli.exe` dan `animeku.exe` dari `%USERPROFILE%\.ca
 
 ### Changelog
 
+#### v0.5.9 — Kartu Discord ala "Watching" dengan progress bar (26 Oktober 2026)
+
+- Kartu RPC sekarang menampilkan judul sebagai header "Watching ...", lalu baris tahun + durasi untuk film (`2026 • 118 menit`) atau episode + durasi untuk serial (`Episode 6 • 24 menit`).
+- Progress bar muncul karena `start` dan `end` timestamp dikirim bersama. Saat melanjutkan tontonan, posisi awal digeser sesuai detik resume.
+- Tombol **Tonton Film**/**Tonton Episode** membuka halaman provider: URL episode Otakudesu dipakai langsung, Idlix memakai `/<section>/<slug>`.
+- Durasi diambil lewat `ffprobe` hanya saat RPC aktif. Kalau durasi tidak terbaca, kartu tetap tampil dengan penghitung waktu tanpa total.
+- Tahun diambil dari metadata provider (`Rilis`, `Tanggal Rilis`, atau `Tahun`).
+
 #### v0.5.8 — Hapus satu seri, filter Terunduh, jeda di Windows (24 Oktober 2026)
 
 - **Terunduh** sekarang punya aksi **Hapus Semua Episode** per judul. Video, subtitle `.vtt`, dan penanda posisi `.pos` ikut terhapus; file yang gagal dihapus tetap dilaporkan.
@@ -393,8 +401,9 @@ Dibandingkan dengan repo upstream (`lucasbuilds/animeku-cli`), fork ini membawa 
 ##### 3. Discord Rich Presence (RPC)
 - Integrasi Discord RPC real-time yang bersih:
   - Membersihkan format judul (menghapus tag `[Movie]`, `Subtitle Indonesia`, dan kurung kosong).
-  - Menampilkan status dinamis (*Full Movie* untuk film atau *Season X • Episode Y* untuk serial).
-  - Menampilkan durasi tonton live (*elapsed timestamp*) dan poster thumbnail anime/film.
+  - Kartu bergaya "Watching": judul jadi header, baris kedua berisi tahun dan durasi (`2026 • 118 menit`) untuk film atau episode dan durasi (`Episode 6 • 24 menit`) untuk serial.
+  - Progress bar berjalan karena start dan end timestamp dikirim sekaligus; resume ikut menggeser posisi awal.
+  - Poster thumbnail anime/film plus tombol **Tonton Film**/**Tonton Episode** ke halaman provider.
 
 ##### 4. Pemutar Media & Tampilan CLI
 - **Integrasi MPV Lebih Matang**:

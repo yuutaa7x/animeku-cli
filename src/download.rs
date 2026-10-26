@@ -643,7 +643,7 @@ fn input_options(provider_type: usize, url: &str) -> Vec<String> {
     options
 }
 
-fn probe_duration(provider_type: usize, url: &str) -> Option<f64> {
+pub(crate) fn probe_duration(provider_type: usize, url: &str) -> Option<f64> {
     if !crate::check_command_exists("ffprobe") {
         return None;
     }

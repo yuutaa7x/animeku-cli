@@ -481,15 +481,32 @@ pub(crate) async fn play_episode(
         .unwrap_or_else(|| episode.clone());
     let provider_type = animeku.provider_type();
     let season_num = detect_season_for_episode(animeku, &movie, &episode);
-    let thumb_url = animeku.get_meta(&movie.id).and_then(|m| m.thumb_url);
+    let meta = animeku.get_meta(&movie.id);
+    let thumb_url = meta.as_ref().and_then(|meta| meta.thumb_url.clone());
+    let meta_data = meta.map(|meta| meta.data).unwrap_or_default();
+    // Drives the Discord progress bar; without it the card still shows the
+    // elapsed time, just no total. Skip the probe entirely when RPC is off.
+    let duration_seconds = if discord.is_some() {
+        crate::download::probe_duration(provider_type, &stream.url).map(|seconds| seconds as u64)
+    } else {
+        None
+    };
 
     update_discord_status(
         discord,
-        &movie.title,
-        &episode.title,
-        episode.is_series,
-        season_num,
-        thumb_url,
+        &crate::discord::PlaybackStatus {
+            movie_id: &movie.id,
+            movie_title: &movie.title,
+            episode_title: &episode.title,
+            episode_id: &episode.id,
+            is_series: episode.is_series,
+            season_num,
+            thumb_url,
+            meta: meta_data,
+            provider_type,
+            start_seconds,
+            duration_seconds,
+        },
     )
     .await;
 
